@@ -1,0 +1,10 @@
+@description "Blob put then get roundtrip via aliased actions"
+@require github.com/nexssp/storage
+
+@assert: result.hit == true
+
+@storage blob:memory as files { }
+
+noop
+-> files.blob.put @{ key: "doc", data: "payload-bytes" }
+-> files.blob.get @{ key: "doc" }

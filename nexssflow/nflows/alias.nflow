@@ -1,0 +1,10 @@
+@description "Alias overrides the colon form for action names"
+@require github.com/nexssp/storage
+
+@assert: result.value == "aliased"
+
+@storage kv:memory as cache { ttl: "1m" }
+
+noop
+-> cache.kv.set @{ key: "k", value: "aliased" }
+-> cache.kv.get @{ key: "k" }

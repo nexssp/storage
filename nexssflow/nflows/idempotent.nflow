@@ -1,0 +1,8 @@
+@description "Idempotent action backed by a declared idem store"
+@require github.com/nexssp/storage
+
+@assert: result == "ok"
+
+@storage idem:memory as idem { ttl: "1h" }
+
+runtime.const:idempotent_store=idem @{ value: "ok" }

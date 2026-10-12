@@ -1,0 +1,130 @@
+@description "Master storage showcase: cache, idempotency, locks, hooks, blobs"
+@require github.com/nexssp/storage
+
+# ============================================================================
+# MASTER SHOWCASE — production-grade storage patterns in one .nflow file
+# ============================================================================
+#
+# This file demonstrates every practical storage pattern:
+#
+#   1. Read-through cache     — :cache_store= (TTL from @storage declaration)
+#   2. Idempotent operation    — :idempotent_store=
+#   3. Distributed lock        — locks.acquire / locks.release
+#   4. Cache miss observation  — @hook:storage.events + storage.probe
+#   5. Blob storage            — files.blob.put / files.blob.get
+#   6. Compile-time checking   — aliased actions (cache.kv.set, not storage.kv.set)
+#
+# Every action name (cache.kv.set, files.blob.put, locks.acquire, etc.)
+# is compile-time-checked. If you typo the alias, nflow lint fails
+# before the flow runs.
+
+# --- Declare all stores ----------------------------------------------------
+# Each declaration materializes as a set of callable actions:
+#
+#   cache.kv.set, cache.kv.get, cache.kv.del
+#   files.blob.put, files.blob.get, files.blob.del
+#   locks.acquire, locks.release
+#
+# The TTL on the @storage line is the cache TTL — one place, not
+# repeated per action.
+
+@storage kv:memory as cache   { ttl: "5m" }
+@storage blob:memory as files   { }
+@storage lock:memory as locks   { }
+@storage idem:memory as idem    { ttl: "1h" }
+@storage journal:memory as journal { }
+
+# --- Observe storage events -------------------------------------------------
+# The storage.events hook stamps a *StorageEvents accumulator into the
+# request context. Every cache.kv.get records cache_hit or cache_miss.
+# Read the accumulator with storage.probe.
+
+@hook:storage.events
+
+# ============================================================================
+# PATTERN 1: Read-through cache
+# ============================================================================
+#
+# The origin pipeline simulates an expensive API call. The
+# :cache_store=cache modifier wires Kernel's CacheMiddleware to use
+# the declared "cache" store. The TTL (5m) comes from the @storage
+# declaration — not repeated on the action.
+#
+# First call: cache MISS → origin pipeline runs → result back-filled.
+# Second call: cache HIT  → origin pipeline does NOT run.
+
+@pipeline origin_user
+  # In production: http.request @{ url: "https://api.example/users/1" }
+  # For the showcase we use const to keep it dependency-free.
+  const @{ value: { id: 1, name: "Alice", email: "alice@example.com" } }
+@end
+
+@pipeline fetch_cached_user :cache_store=cache
+  pipeline.origin_user
+@end
+
+# ============================================================================
+# PATTERN 2: Idempotent payment
+# ============================================================================
+#
+# The :idempotent_store=idem modifier wires Kernel's
+# IdempotencyMiddleware. A second call with the same RequestID
+# replays the cached result without re-executing the handler.
+
+@pipeline charge_handler
+  const @{ value: { charged: true, amount: 100, currency: "USD" } }
+@end
+
+@pipeline charge :idempotent_store=idem
+  pipeline.charge_handler
+@end
+
+# ============================================================================
+# PATTERN 3: Distributed lock for exclusive job processing
+# ============================================================================
+#
+# Acquire a lock, do the work, release. If a second worker tries to
+# acquire the same key, it gets acquired=false (not an error).
+
+@pipeline process_job
+  locks.acquire @{ key: "job:cleanup", ttl: "30s" }
+  -> const @{ value: { status: "processed", worker: "w1" } }
+  -> locks.release @{ key: "job:cleanup" }
+@end
+
+# ============================================================================
+# PATTERN 4: Blob storage — write a file, read it back
+# ============================================================================
+
+@pipeline store_document
+  files.blob.put @{ key: "reports/2026/q4.json", data: { revenue: 1200000, quarter: "Q4" } }
+  -> files.blob.get @{ key: "reports/2026/q4.json" }
+@end
+
+# ============================================================================
+# PATTERN 5: Cache miss observation via hooks
+# ============================================================================
+#
+# Call cache.kv.get on a missing key, then probe the accumulated
+# events to prove the miss was recorded.
+
+@pipeline observe_cache_miss
+  cache.kv.get @{ key: "definitely-missing-key" }
+  -> storage.probe
+@end
+
+# ============================================================================
+# RUN ALL PATTERNS
+# ============================================================================
+#
+# Execute every pattern and gather results. The parallel block runs
+# them concurrently and collects results under stable keys.
+
+parallel {
+  user_first:  pipeline.fetch_cached_user,
+  user_second: pipeline.fetch_cached_user,
+  payment:     pipeline.charge,
+  job:         pipeline.process_job,
+  doc:         pipeline.store_document,
+  miss_probe:  pipeline.observe_cache_miss,
+}

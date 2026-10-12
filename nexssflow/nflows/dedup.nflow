@@ -1,0 +1,8 @@
+@description "Dedup backed by a declared lock store"
+@require github.com/nexssp/storage
+
+@assert: result == "ok"
+
+@storage lock:memory as locks { }
+
+runtime.const:dedup_store=locks @{ value: "ok" }

@@ -1,0 +1,10 @@
+@description "Lock acquire then release via aliased actions"
+@require github.com/nexssp/storage
+
+@assert: result.ok == true
+
+@storage lock:memory as locks { }
+
+noop
+-> locks.acquire @{ key: "job:1", ttl: "30s" }
+-> locks.release @{ key: "job:1" }

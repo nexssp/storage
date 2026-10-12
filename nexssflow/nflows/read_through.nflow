@@ -1,0 +1,16 @@
+@description "Read-through cache: miss fetches origin, second call hits"
+@require github.com/nexssp/storage
+
+@assert: result.value.name == "Alice"
+
+@storage kv:memory as cache { ttl: "5m" }
+
+@pipeline origin_user
+  const @{ value: { id: 1, name: "Alice" } }
+@end
+
+@pipeline cached_user :cache_store=cache
+  pipeline.origin_user
+@end
+
+{} -> pipeline.cached_user

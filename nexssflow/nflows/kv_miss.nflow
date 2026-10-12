@@ -1,0 +1,13 @@
+@description "Cache miss returns hit=false; observable via storage.probe"
+@require github.com/nexssp/storage
+
+@assert: result.attached == true
+@assert: result.misses == 1
+@assert: result.hits == 0
+
+@storage kv:memory as cache { }
+@hook:storage.events
+
+noop
+-> cache.kv.get @{ key: "absent" }
+-> storage.probe

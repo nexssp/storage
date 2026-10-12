@@ -1,0 +1,11 @@
+@description "Aliased KV set then get (compile-time-checked action names)"
+@require github.com/nexssp/storage
+
+@assert: result.hit == true
+@assert: result.value == "hello"
+
+@storage kv:memory as cache { ttl: "5m" }
+
+noop
+-> cache.kv.set @{ key: "greeting", value: "hello" }
+-> cache.kv.get @{ key: "greeting" }
