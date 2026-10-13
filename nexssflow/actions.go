@@ -1,11 +1,14 @@
 package nexssflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"time"
 
 	"github.com/nexssp/kernel/action"
+	"github.com/nexssp/kernel/xfile"
 
 	"github.com/nexssp/storage"
 )
@@ -198,8 +201,8 @@ type blobGetReq struct {
 }
 
 type blobGetRes struct {
-	Data []byte `json:"data"`
-	Hit  bool   `json:"hit"`
+	Ref xfile.Ref `json:"ref"`
+	Hit bool      `json:"hit"`
 }
 
 func blobGetAction() action.AnyAction {
@@ -217,13 +220,13 @@ func blobGetAction() action.AnyAction {
 			if err != nil {
 				return blobGetRes{}, err
 			}
-			data, hit, err := store.Get(ctx, req.Key)
+			ref, hit, err := store.Get(ctx, req.Key)
 			if err != nil {
-				return blobGetRes{}, storage.Unavailable("storage.blob.get failed", err)
+				return blobGetRes{}, err
 			}
-			return blobGetRes{Data: data, Hit: hit}, nil
+			return blobGetRes{Ref: ref, Hit: hit}, nil
 		}).
-		Description("Get a blob from a blob store").
+		Description("Look up a blob and return its compact xfile.Ref handle, never its bytes").
 		Tag("storage", "blob", "get").
 		Build()
 }
@@ -235,7 +238,8 @@ type blobPutReq struct {
 }
 
 type blobPutRes struct {
-	OK bool `json:"ok"`
+	Ref xfile.Ref `json:"ref"`
+	OK  bool      `json:"ok"`
 }
 
 func blobPutAction() action.AnyAction {
@@ -253,16 +257,17 @@ func blobPutAction() action.AnyAction {
 			if err != nil {
 				return blobPutRes{}, err
 			}
-			data, err := toBytes(req.Data)
+			src, err := toReader(req.Data)
 			if err != nil {
 				return blobPutRes{}, err
 			}
-			if err := store.Put(ctx, req.Key, data); err != nil {
-				return blobPutRes{}, storage.Unavailable("storage.blob.put failed", err)
+			ref, err := store.Put(ctx, req.Key, src)
+			if err != nil {
+				return blobPutRes{}, err
 			}
-			return blobPutRes{OK: true}, nil
+			return blobPutRes{Ref: ref, OK: true}, nil
 		}).
-		Description("Put a blob into a blob store").
+		Description("Stream a blob into storage and return its compact xfile.Ref handle").
 		Tag("storage", "blob", "put").
 		Build()
 }
@@ -277,8 +282,6 @@ type blobDelRes struct {
 }
 
 // different Kind (Blob) and calls a different method (Delete).
-//
-//nolint:dupl // structurally similar to lockReleaseAction but asserts a
 func blobDelAction() action.AnyAction {
 	return action.New("storage.blob.del",
 		func(ctx context.Context, req blobDelReq) (blobDelRes, error) {
@@ -295,7 +298,7 @@ func blobDelAction() action.AnyAction {
 				return blobDelRes{}, err
 			}
 			if err := store.Delete(ctx, req.Key); err != nil {
-				return blobDelRes{}, storage.Unavailable("storage.blob.del failed", err)
+				return blobDelRes{}, err
 			}
 			return blobDelRes{OK: true}, nil
 		}).
@@ -358,8 +361,6 @@ type lockReleaseRes struct {
 }
 
 // different Kind (Mutex) and calls a different method (Unlock).
-//
-//nolint:dupl // structurally similar to blobDelAction but asserts a
 func lockReleaseAction() action.AnyAction {
 	return action.New("storage.lock.release",
 		func(ctx context.Context, req lockReleaseReq) (lockReleaseRes, error) {
@@ -389,22 +390,36 @@ func lockReleaseAction() action.AnyAction {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// toBytes coerces a runtime value (from a parsed @{ ... } block) to
-// []byte. Strings are returned as-is; everything else is JSON-encoded.
-func toBytes(v any) ([]byte, error) {
+// toReader coerces a runtime value to an input stream. Existing readers stay
+// streams; simple Flow values are converted to a byte reader.
+func toReader(v any) (io.Reader, error) {
 	switch x := v.(type) {
-	case nil:
-		return nil, nil
-	case []byte:
+	case io.Reader:
 		return x, nil
+	case nil:
+		return bytes.NewReader(nil), nil
+	case []byte:
+		return bytes.NewReader(x), nil
 	case string:
-		return []byte(x), nil
+		return bytes.NewReader([]byte(x)), nil
 	default:
 		data, err := json.Marshal(v)
 		if err != nil {
-			return nil, storage.BadRequestf(
-				"storage.blob: cannot encode value as bytes: %v", err)
+			return nil, storage.BadRequestf("storage.blob: cannot encode value as bytes: %v", err)
 		}
-		return data, nil
+		return bytes.NewReader(data), nil
 	}
+}
+
+// toBytes remains for byte-oriented journal actions; Blob actions use toReader.
+func toBytes(v any) ([]byte, error) {
+	reader, err := toReader(v)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, storage.BadRequestf("storage: read value: %v", err)
+	}
+	return data, nil
 }

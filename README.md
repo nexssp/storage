@@ -16,6 +16,8 @@ One Go module (`github.com/nexssp/storage`) with three layers:
    `storage.events` hook, the `storage.probe` action, and three
    middleware-wiring modifiers.
 
+Database schema and persistent-data versioning follow the [Nexss storage migration standard](docs/migrations.md). The proposed SQL action surface and application-schema workflow are outlined in the [database plan](docs/database-plan.md).
+
 One `@require` loads everything:
 
 ```nflow
@@ -27,7 +29,7 @@ One `@require` loads everything:
 | Kind | Kernel interface | Use case |
 |---|---|---|
 | `kv` | `action.CacheLayer[V]` | Typed values with TTL |
-| `blob` | `storage.BlobStore` | Opaque bytes — files, snapshots |
+| `blob` | `storage.BlobStore` | Streamed file/document payloads addressed by typed `xfile.Ref` |
 | `lock` | `action.Mutex` | Best-effort distributed lock |
 | `fenced_lock` | `action.FencedMutex` | Monotonic-fence lock |
 | `idem` | `action.IdempotencyStore` (+`Coordinator`) | Idempotent replay + claims |
@@ -111,6 +113,8 @@ in fixtures:
 
 ## Architecture
 
+Blob writes and opens use streams; lookups return compact typed references rather than bytes. References carry expected integrity metadata, while confirmed metadata is returned separately by `Open`. See [Blob references and streams](docs/blob-references.md) for API signatures, caller/tenant scope rules, and current adapter buffering limits.
+
 ```
 .nflow source
     │
@@ -135,10 +139,33 @@ nexssp/storage/nexssflow/         ← the Flow bundle
     ▼
 nexssp/storage                    ← the adapter contract
     ├── backend.go                Kind, Backend, Instance, Registry
-    ├── blob.go                   BlobStore (proposed Kernel promotion)
+    ├── blob.go                   streaming BlobStore + xfile references
     ├── errors.go
     └── memory/memory.go          8 reference backends
     │
     ▼
 nexssp/kernel                     ← unchanged
 ```
+
+## Persistent adapters
+
+The module includes these persistent backends alongside the reference memory implementations:
+
+| Package | Backends | Key options |
+|---|---|---|
+| `sqlite` | `kv`, `blob`, `tx` | `path`, optional `namespace`, KV `ttl` |
+| `postgres` | `kv`, `blob`, `tx` | `dsn`, optional `namespace`, KV `ttl` |
+| `redis` | `kv`, `blob`, `lock` | `addr`, optional `username`, `password`, `db`, `namespace`, KV `ttl` |
+
+The Flow bundle registers these backend names automatically. For pure-Go consumers, each package exposes `Register(reg *storage.Registry)`. For example:
+
+```go
+reg := storage.NewRegistry()
+if err := sqlite.Register(reg); err != nil {
+    panic(err)
+}
+```
+
+SQLite/PostgreSQL SQL tables are **not** created by `Open`. Apply the versioned Goose migrations as an explicit deployment step first; see [the migration standard](docs/migrations.md). Each SQL package exposes its own embedded migration filesystem through `Migrations()`. Redis uses the default keyspace prefix `nexss:storage:v1`; choose a separate namespace when isolating applications.
+
+For a copy-paste PostgreSQL example, see [`examples/postgres/`](examples/postgres/): it includes a loopback-only Compose database with development defaults, the explicit Goose command, a runnable Go KV example, and a Flow sample. The demo password and `sslmode=disable` are local-only; production DSNs must come from trusted runtime configuration.

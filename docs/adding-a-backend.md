@@ -16,7 +16,7 @@ register separate Backend instances for each Kind.
 | Kind | Implements | Required methods |
 |---|---|---|
 | `kv` | `action.CacheLayer[any]` | `Get(ctx, key) (any, bool, error)`, `Set(ctx, key, val, ttl) error` |
-| `blob` | `storage.BlobStore` | `Get`, `Put`, `Delete` |
+| `blob` | `storage.BlobStore` | `Get(ctx,key) (xfile.Ref,bool,error)`, `Put(ctx,key,io.Reader) (xfile.Ref,error)`, `Open(ctx,ref) (io.ReadCloser,xfile.Info,error)`, `Delete` |
 | `lock` | `action.Mutex` | `TryLock(ctx, key, ttl) (bool, error)`, `Unlock(ctx, key) error` |
 | `fenced_lock` | `action.FencedMutex` | `Acquire`, `Renew`, `Release` |
 | `idem` | `action.IdempotencyStore` | `Get(ctx, key) (IdempotencyEntry, bool)`, `Set(ctx, key, entry, ttl)` |
@@ -146,6 +146,12 @@ where to add the import.
 Every backend MUST pass the conformance suite. The memory backend's
 tests (`memory/memory_test.go`) are the reference — copy them and
 swap `memory.KV{}` for your backend.
+
+Blob resolvers must use `xfile.ScopeFromContext` and compare the resulting
+caller/tenant with stored ownership metadata. A `Ref` is untrusted selection
+and integrity data, never authorization. Keep `Ref.Expected*` expectations
+distinct from confirmed `xfile.Info` returned by `Open`; see
+[`blob-references.md`](blob-references.md).
 
 Conformance tests cover:
 - Happy path (get/set, acquire/release, claim/complete)

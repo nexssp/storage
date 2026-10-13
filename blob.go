@@ -2,37 +2,35 @@ package storage
 
 import (
 	"context"
+	"io"
+
+	"github.com/nexssp/kernel/xfile"
 )
 
-// BlobStore is the contract for opaque byte-slice storage without TTL
-// semantics. It is intentionally separate from action.CacheLayer[V]:
+// BlobStore stores opaque payloads without TTL semantics. Unlike a KV cache,
+// BlobStore is intended for files, documents, snapshots, and other large data.
 //
-//   - CacheLayer is for typed values with per-entry TTL. It powers
-//     read-through caching and singleflight stampede protection.
-//   - BlobStore is for opaque payloads (files, snapshots, documents)
-//     where the caller owns the encoding and lifecycle. A Blob has no
-//     TTL; deletion is explicit.
-//
-// This interface is defined here, in package storage, to keep the
-// prototype self-contained. The migration plan (see
-// docs/promote-to-kernel.md) is to move it to package action once the
-// first non-memory backend (e.g., S3) validates the shape.
-//
-// Until promotion, both the storage package and Flow extension import
-// it from here. After promotion, the storage package will re-export
-// action.BlobStore as storage.BlobStore for backwards compatibility.
+// Put consumes src and returns an opaque, provider-scoped reference. Get is a
+// metadata-only lookup: it returns a compact xfile.Ref, never the object bytes.
+// Open streams an object identified by a reference and returns confirmed
+// metadata separately from the caller-supplied expectations in xfile.Ref.
+// Implementations scope operations to the authenticated caller and tenant in
+// ctx; references are untrusted selectors, not authorization credentials.
 type BlobStore interface {
-	// Get returns the bytes for key. A missing key returns
-	// (nil, false, nil) — a missing blob is not an error. Storage
-	// failures return (nil, false, err) with a classified xerr kind.
-	Get(ctx context.Context, key string) (data []byte, hit bool, err error)
+	// Get looks up key and returns a small reference. A missing or inaccessible
+	// key returns (zero, false, nil). The reference carries expected metadata
+	// when the backend has it; it never contains the payload.
+	Get(ctx context.Context, key string) (ref xfile.Ref, hit bool, err error)
 
-	// Put stores data under key. The implementation MUST be
-	// idempotent: re-putting the same key overwrites. Storage
-	// failures return a classified xerr.
-	Put(ctx context.Context, key string, data []byte) error
+	// Put streams src under key, replacing any existing object. It returns a
+	// typed reference with integrity expectations for the bytes consumed.
+	Put(ctx context.Context, key string, src io.Reader) (xfile.Ref, error)
 
-	// Delete removes key. A missing key is not an error. Storage
-	// failures return a classified xerr.
+	// Open resolves ref and returns a reader owned by the caller plus confirmed
+	// metadata for the opened object. Expected metadata in ref is verified.
+	Open(ctx context.Context, ref xfile.Ref) (io.ReadCloser, xfile.Info, error)
+
+	// Delete removes key for the authenticated caller and tenant. A missing or
+	// inaccessible key is not an error.
 	Delete(ctx context.Context, key string) error
 }

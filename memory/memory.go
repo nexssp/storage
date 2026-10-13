@@ -14,13 +14,17 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"sync"
 	"time"
 
 	"github.com/nexssp/kernel/action"
+	"github.com/nexssp/kernel/xfile"
 
 	"github.com/nexssp/storage"
+	"github.com/nexssp/storage/internal/blobref"
 )
 
 // backendName is the Name() value shared by every in-process backend
@@ -137,57 +141,122 @@ func (Blob) Name() string       { return backendName }
 func (Blob) Kind() storage.Kind { return storage.KindBlob }
 
 func (Blob) Open(_ map[string]string) (storage.Instance, error) {
-	return &blobInstance{data: make(map[string][]byte)}, nil
+	return &blobInstance{data: make(map[string]blobRecord)}, nil
+}
+
+type blobRecord struct {
+	data []byte
+	blobref.Metadata
 }
 
 type blobInstance struct {
 	mu   sync.RWMutex
-	data map[string][]byte
+	data map[string]blobRecord
 }
 
 func (b *blobInstance) Kind() storage.Kind { return storage.KindBlob }
 func (b *blobInstance) Close() error       { return nil }
 
-func (b *blobInstance) Get(ctx context.Context, key string) (data []byte, hit bool, err error) {
+func (b *blobInstance) Get(ctx context.Context, key string) (xfile.Ref, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, false, err
+		return xfile.Ref{}, false, err
 	}
+	scope, err := blobref.Scope(ctx)
+	if err != nil {
+		return xfile.Ref{}, false, err
+	}
+	storageKey := blobref.ScopedKey(scope, key)
 	b.mu.RLock()
-	val, ok := b.data[key]
+	record, ok := b.data[storageKey]
 	b.mu.RUnlock()
-	if !ok {
-		return nil, false, nil
+	if !ok || !blobref.Authorized(scope, record.Metadata) {
+		return xfile.Ref{}, false, nil
 	}
-	// Return a copy so callers cannot mutate stored state.
-	out := make([]byte, len(val))
-	copy(out, val)
-	return out, true, nil
+	if err := blobref.ValidateMetadata(record.Metadata); err != nil {
+		return xfile.Ref{}, false, err
+	}
+	return blobref.NewRef(backendName, key, record.Metadata), true, nil
 }
 
-func (b *blobInstance) Put(ctx context.Context, key string, data []byte) error {
+func (b *blobInstance) Put(ctx context.Context, key string, src io.Reader) (xfile.Ref, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return xfile.Ref{}, err
 	}
-	// Store a copy so callers cannot mutate stored state after Put.
-	stored := make([]byte, len(data))
-	copy(stored, data)
+	scope, err := blobref.Scope(ctx)
+	if err != nil {
+		return xfile.Ref{}, err
+	}
+	if src == nil {
+		return xfile.Ref{}, storage.BadRequest("blob: source reader is required")
+	}
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return xfile.Ref{}, storage.BadRequestf("blob: read source: %v", err)
+	}
+	meta := blobref.MetadataFor(scope, data)
+	if err := ctx.Err(); err != nil {
+		return xfile.Ref{}, err
+	}
+	storageKey := blobref.ScopedKey(scope, key)
 	b.mu.Lock()
-	b.data[key] = stored
+	b.data[storageKey] = blobRecord{data: data, Metadata: meta}
 	b.mu.Unlock()
-	return nil
+	return blobref.NewRef(backendName, key, meta), nil
+}
+
+func (b *blobInstance) Open(ctx context.Context, ref xfile.Ref) (io.ReadCloser, xfile.Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, xfile.Info{}, err
+	}
+	scope, err := blobref.Scope(ctx)
+	if err != nil {
+		return nil, xfile.Info{}, err
+	}
+	key, err := blobref.Key(backendName, ref)
+	if err != nil {
+		return nil, xfile.Info{}, err
+	}
+	storageKey := blobref.ScopedKey(scope, key)
+	b.mu.RLock()
+	record, ok := b.data[storageKey]
+	b.mu.RUnlock()
+	if !ok {
+		return nil, xfile.Info{}, storage.NotFound("blob: reference not found")
+	}
+	if ownerErr := blobref.CheckOwner(scope, record.Metadata); ownerErr != nil {
+		return nil, xfile.Info{}, ownerErr
+	}
+	size, digest, err := blobref.ConfirmStored(record.data, record.Metadata)
+	if err != nil {
+		return nil, xfile.Info{}, err
+	}
+	if err := blobref.Verify(ref, size, digest); err != nil {
+		return nil, xfile.Info{}, err
+	}
+	return io.NopCloser(bytes.NewReader(record.data)), blobref.Info(ref, size, digest), nil
 }
 
 func (b *blobInstance) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	scope, err := blobref.Scope(ctx)
+	if err != nil {
+		return err
+	}
+	storageKey := blobref.ScopedKey(scope, key)
 	b.mu.Lock()
-	delete(b.data, key)
+	if record, ok := b.data[storageKey]; ok && blobref.Authorized(scope, record.Metadata) {
+		delete(b.data, storageKey)
+	}
 	b.mu.Unlock()
 	return nil
 }
 
-var _ storage.BlobStore = (*blobInstance)(nil)
+var (
+	_ storage.BlobStore = (*blobInstance)(nil)
+	_ xfile.Resolver    = (*blobInstance)(nil)
+)
 
 // ---------------------------------------------------------------------------
 // KindLock — action.Mutex

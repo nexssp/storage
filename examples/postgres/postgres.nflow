@@ -1,0 +1,16 @@
+@description "PostgreSQL-backed KV example; local development credentials only"
+@require github.com/nexssp/storage
+
+@assert: result.hit == true
+@assert: result.value == "hello from Flow"
+
+# Must match examples/postgres/compose.yaml and is for local development only.
+@storage kv:postgres as cache {
+  dsn: "postgres://storage_dev:storage_dev_only_change_me@127.0.0.1:54329/storage_dev?sslmode=disable"
+  namespace: "flow-demo"
+  ttl: "5m"
+}
+
+noop
+-> cache.kv.set @{ key: "greeting", value: "hello from Flow" }
+-> cache.kv.get @{ key: "greeting" }

@@ -1,0 +1,23 @@
+services:
+  postgres:
+    # Stay on the supported PostgreSQL 17 series while receiving patch updates.
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-storage_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-storage_dev}
+      # Local demo only. Override this for anything beyond a disposable workstation DB.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-storage_dev_only_change_me}
+    # Do not expose this demo database on the LAN.
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  postgres-data:

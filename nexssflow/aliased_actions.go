@@ -140,13 +140,13 @@ func aliasedBlobGet(s *store, storeName string) action.AnyAction {
 			if err != nil {
 				return blobGetRes{}, err
 			}
-			data, hit, err := store.Get(ctx, req.Key)
+			ref, hit, err := store.Get(ctx, req.Key)
 			if err != nil {
-				return blobGetRes{}, storage.Unavailable("blob.get failed", err)
+				return blobGetRes{}, err
 			}
-			return blobGetRes{Data: data, Hit: hit}, nil
+			return blobGetRes{Ref: ref, Hit: hit}, nil
 		}).
-		Description("Get a blob from "+storeName).
+		Description("Look up a blob from "+storeName+" and return its compact xfile.Ref handle, never its bytes").
 		Tag("storage", "blob", "get").
 		Build()
 }
@@ -166,23 +166,22 @@ func aliasedBlobPut(s *store, storeName string) action.AnyAction {
 			if err != nil {
 				return blobPutRes{}, err
 			}
-			data, err := toBytes(req.Data)
+			src, err := toReader(req.Data)
 			if err != nil {
 				return blobPutRes{}, err
 			}
-			if err := store.Put(ctx, req.Key, data); err != nil {
-				return blobPutRes{}, storage.Unavailable("blob.put failed", err)
+			ref, err := store.Put(ctx, req.Key, src)
+			if err != nil {
+				return blobPutRes{}, err
 			}
-			return blobPutRes{OK: true}, nil
+			return blobPutRes{Ref: ref, OK: true}, nil
 		}).
-		Description("Put a blob into "+storeName).
+		Description("Stream a blob into "+storeName+" and return its compact xfile.Ref handle").
 		Tag("storage", "blob", "put").
 		Build()
 }
 
 // different Kind (Blob) and calls a different method (Delete).
-//
-//nolint:dupl // structurally similar to aliasedLockRelease but asserts a
 func aliasedBlobDel(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".blob.del",
 		func(ctx context.Context, req struct {
@@ -198,7 +197,7 @@ func aliasedBlobDel(s *store, storeName string) action.AnyAction {
 				return blobDelRes{}, err
 			}
 			if err := store.Delete(ctx, req.Key); err != nil {
-				return blobDelRes{}, storage.Unavailable("blob.del failed", err)
+				return blobDelRes{}, err
 			}
 			return blobDelRes{OK: true}, nil
 		}).
@@ -242,8 +241,6 @@ func aliasedLockAcquire(s *store, storeName string) action.AnyAction {
 }
 
 // different Kind (Mutex) and calls a different method (Unlock).
-//
-//nolint:dupl // structurally similar to aliasedBlobDel but asserts a
 func aliasedLockRelease(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".release",
 		func(ctx context.Context, req struct {

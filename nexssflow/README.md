@@ -28,7 +28,10 @@ noop -> storage.kv.get @{ store: "cache", key: "k" }
 
 Eight actions: `storage.kv.{get,set,del}`, `storage.blob.{get,put,del}`,
 `storage.lock.{acquire,release}`. Each takes a `store:` argument
-naming the `@storage` declaration.
+naming the `@storage` declaration. Blob put accepts streamed input and
+returns an `xfile.Ref`; Blob get is a metadata-only lookup returning
+`{ ref, hit }`, never the payload bytes. All Blob operations require an
+authenticated caller-and-tenant scope in the request context.
 
 ### Layer 2 — Middleware wiring (the practical path)
 
@@ -105,16 +108,16 @@ served from cache with zero handler invocations.
 
 Three reasons:
 
-1. **Adapter packages depend on nexssp/storage, not on Flow.** A
-   Redis adapter repo (`nexssp/storage-redis`) imports
+1. **Adapter packages depend on nexssp/storage, not on Flow.** The
+   SQLite, PostgreSQL, and Redis packages in this module import
    `github.com/nexssp/storage` for the `Backend` interface. If the
    Flow bundle lived inside `flow/extensions/storage/`, the Redis
    adapter would have to import Flow to get the bundle — backwards.
 
-2. **One `@require` loads everything.** The user writes one line,
-   not two. The bundle ships with the adapter contract; adding a new
-   backend (Redis) is a separate `@require` of `nexssp/storage-redis`,
-   not a Flow PR.
+2. **One `@require` loads the built-ins.** The user writes one line,
+   not two. The bundle registers memory, SQLite, PostgreSQL, and Redis
+   backends. Additional third-party adapters are integrated by adding
+   their registration to this bundle; no Flow repository change is needed.
 
 3. **Flow stays focused on language features.** `flow/extensions/loop`,
    `flow/extensions/on_error`, `flow/extensions/macros` are language

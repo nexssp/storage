@@ -3,10 +3,13 @@ package memory
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nexssp/kernel/action"
+	"github.com/nexssp/kernel/xctx"
 
 	"github.com/nexssp/storage"
 )
@@ -78,17 +81,35 @@ func TestBlob_GetPutDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assert: %v", err)
 	}
-	ctx := context.Background()
+	ctx := blobTestContext()
 
 	if _, hit, err := store.Get(ctx, "missing"); err != nil || hit {
 		t.Fatalf("missing: hit=%v err=%v", hit, err)
 	}
-	if err := store.Put(ctx, "f", []byte("hello")); err != nil {
+	putRef, err := store.Put(ctx, "f", strings.NewReader("hello"))
+	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	data, hit, err := store.Get(ctx, "f")
-	if err != nil || !hit || string(data) != "hello" {
-		t.Fatalf("get: data=%q hit=%v err=%v", data, hit, err)
+	if putRef.ExpectedSize != 5 || !strings.HasPrefix(string(putRef.ExpectedDigest), "sha256:") {
+		t.Fatalf("put reference metadata: %+v", putRef)
+	}
+	ref, hit, err := store.Get(ctx, "f")
+	if err != nil || !hit || ref.ID != putRef.ID || ref.Provider != putRef.Provider {
+		t.Fatalf("get: ref=%+v hit=%v err=%v", ref, hit, err)
+	}
+	reader, info, err := store.Open(ctx, ref)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); closeErr != nil {
+		t.Fatalf("close: %v", closeErr)
+	}
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("read: data=%q err=%v", data, err)
+	}
+	if info.Size != 5 || info.Digest != string(ref.ExpectedDigest) {
+		t.Fatalf("confirmed info: %+v", info)
 	}
 	if err := store.Delete(ctx, "f"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -98,20 +119,69 @@ func TestBlob_GetPutDelete(t *testing.T) {
 	}
 }
 
-// Blob must return a copy — caller mutation must not affect stored state.
-func TestBlob_GetReturnsCopy(t *testing.T) {
+func TestBlob_RequiresScopeAndVerifiesExpectations(t *testing.T) {
 	inst, _ := Blob{}.Open(nil)
 	store, _ := storage.AssertBlob(inst)
-	ctx := context.Background()
-
-	original := []byte("abcdef")
-	_ = store.Put(ctx, "k", original)
-	got, _, _ := store.Get(ctx, "k")
-	got[0] = 'X'
-	got2, _, _ := store.Get(ctx, "k")
-	if got2[0] != 'a' {
-		t.Fatalf("stored data mutated: got %q", got2)
+	ctx := blobTestContext()
+	ref, err := store.Put(ctx, "k", strings.NewReader("abcdef"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, _, err := store.Get(context.Background(), "k"); err == nil {
+		t.Fatal("expected missing authentication/tenant scope error")
+	}
+	other := xctx.WithTenantID(xctx.WithUserID(context.Background(), "other-user"), "tenant-1")
+	if _, hit, err := store.Get(other, "k"); err != nil || hit {
+		t.Fatalf("other user's lookup must be concealed: hit=%v err=%v", hit, err)
+	}
+	if _, _, err := store.Open(other, ref); err == nil {
+		t.Fatal("expected other user to be denied opening reference")
+	}
+	otherRef, err := store.Put(other, "k", strings.NewReader("other"))
+	if err != nil {
+		t.Fatalf("other user can store the same logical key in an isolated scope: %v", err)
+	}
+	ownerRef, hit, err := store.Get(ctx, "k")
+	if err != nil || !hit || ownerRef.ExpectedDigest != ref.ExpectedDigest {
+		t.Fatalf("other scope must not overwrite owner object: ref=%+v hit=%v err=%v", ownerRef, hit, err)
+	}
+	otherLookup, hit, err := store.Get(other, "k")
+	if err != nil || !hit || otherLookup.ExpectedDigest != otherRef.ExpectedDigest {
+		t.Fatalf("other scope should see its own object: ref=%+v hit=%v err=%v", otherLookup, hit, err)
+	}
+	otherTenant := xctx.WithTenantID(xctx.WithUserID(context.Background(), "user-1"), "tenant-2")
+	if _, hit, err := store.Get(otherTenant, "k"); err != nil || hit {
+		t.Fatalf("other tenant's lookup must be concealed: hit=%v err=%v", hit, err)
+	}
+	badRef := ref
+	badRef.ExpectedSize++
+	if _, _, err := store.Open(ctx, badRef); err == nil {
+		t.Fatal("expected mismatched expected size to be rejected")
+	}
+	reader, _, err := store.Open(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[0] = 'X'
+	reader, _, err = store.Open(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(second) != "abcdef" {
+		t.Fatalf("reader data must not mutate stored object: %q err=%v", second, err)
+	}
+}
+
+func blobTestContext() context.Context {
+	ctx := xctx.WithUserID(context.Background(), "user-1")
+	return xctx.WithTenantID(ctx, "tenant-1")
 }
 
 // Lock conformance.

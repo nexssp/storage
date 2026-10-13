@@ -6,7 +6,7 @@
 // Kind, and produces an Instance from an options map. Every Instance
 // satisfies one or more concrete Kernel interfaces (CacheLayer[V],
 // Mutex, FencedMutex, IdempotencyStore, Journal, TxRunner, RateLimiter,
-// or the proposed BlobStore defined in blob.go).
+// or the streaming BlobStore defined in blob.go).
 //
 // Typical use:
 //
@@ -53,10 +53,10 @@ const (
 	// session stores, and small structured records.
 	KindKV Kind = "kv"
 
-	// KindBlob maps to BlobStore (defined in blob.go, proposed for
-	// promotion to package action). A Blob store serves opaque byte
-	// slices without TTL semantics. Use this for files, documents,
-	// snapshots, and large payloads.
+	// KindBlob maps to BlobStore (defined in blob.go). A Blob store
+	// serves streamed objects addressed by typed xfile.Ref handles,
+	// without TTL semantics. Use it for files, documents, snapshots,
+	// and large payloads.
 	KindBlob Kind = "blob"
 
 	// KindLock maps to action.Mutex. A basic distributed lock with

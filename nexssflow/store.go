@@ -26,6 +26,7 @@ type bundle struct {
 func newBundle() *bundle {
 	b := &bundle{reg: storage.NewRegistry()}
 	registerMemoryBackends(b.reg)
+	registerPersistentBackends(b.reg)
 	return b
 }
 

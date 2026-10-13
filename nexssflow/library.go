@@ -9,6 +9,9 @@ import (
 
 	"github.com/nexssp/storage"
 	"github.com/nexssp/storage/memory"
+	"github.com/nexssp/storage/postgres"
+	"github.com/nexssp/storage/redis"
+	"github.com/nexssp/storage/sqlite"
 )
 
 const ID = "storage"
@@ -72,6 +75,18 @@ func registerMemoryBackends(reg *storage.Registry) {
 		memory.NewRateLimit(),
 	} {
 		reg.MustRegister(bk)
+	}
+}
+
+func registerPersistentBackends(reg *storage.Registry) {
+	for _, register := range []func(*storage.Registry) error{
+		sqlite.Register,
+		postgres.Register,
+		redis.Register,
+	} {
+		if err := register(reg); err != nil {
+			panic(err)
+		}
 	}
 }
 
