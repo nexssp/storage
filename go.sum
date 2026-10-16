@@ -69,8 +69,12 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/nexssp/flow v0.28.1 h1:6DHBR8bb0tXVQHBO/0ocK5rkpdzD5c11UI1jm8fdEJk=
 github.com/nexssp/flow v0.28.1/go.mod h1:3xCOePj0zixyYoQvdxCYfssMWGST/wiJXZMvo6y4gGo=
+github.com/nexssp/flow v0.34.0 h1:PqpLjBtNE0QtkEbq1xVyssflRtj3ucWHDIPcf+KrHjU=
+github.com/nexssp/flow v0.34.0/go.mod h1:d14spwviPBiA/Q85Z5fw31O7qlqABF02mv+kWiL+ya4=
 github.com/nexssp/kernel v0.32.0 h1:Xkf9btSyT8bsrg9lTjCNSjaT0J9CR7t1uzt4/eyCzDY=
 github.com/nexssp/kernel v0.32.0/go.mod h1:hQvWapQSk0VNS0ufG84j6fTnEYFuc+inehGLYQ0kEdc=
+github.com/nexssp/kernel v0.35.0 h1:dHj4dvUnNH4RC0ImAC26olaAK667HFF30XJFTpr6DLg=
+github.com/nexssp/kernel v0.35.0/go.mod h1:hQvWapQSk0VNS0ufG84j6fTnEYFuc+inehGLYQ0kEdc=
 github.com/nexssp/validation v0.3.0 h1:j9iLKqXqDIQfUijEGEEnhZYESj8GILIYqznSDKa0fxE=
 github.com/nexssp/validation v0.3.0/go.mod h1:S7Z7soTGH2S6/Z61cFVZMvonr3yYyTG2vY/cci8fEUE=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
