@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -187,5 +190,214 @@ func TestSQLiteBackendsRequireExplicitMigrationAndSupportStorage(t *testing.T) {
 	check, _ := storage.AssertKV(checkInst)
 	if value, hit, err := check.Get(ctx, "committed"); err != nil || !hit || value != "yes" {
 		t.Fatalf("committed value=%#v hit=%v err=%v", value, hit, err)
+	}
+}
+
+func TestSQLiteKVAndBlobOperationsJoinTransactionAndRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "storage.db")
+	ctx := xctx.WithTenantID(xctx.WithUserID(context.Background(), "tx-user"), "tx-tenant")
+	setup, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyEmbeddedMigrations(t, setup)
+	if err := setup.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	kvInst, err := NewKV().Open(map[string]string{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kvInst.Close()
+	kv, err := storage.AssertKV(kvInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobInst, err := NewBlob().Open(map[string]string{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blobInst.Close()
+	blob, err := storage.AssertBlob(blobInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobCtx := ctx
+	txInst, err := NewTx().Open(map[string]string{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txInst.Close()
+	runner, err := storage.AssertTxRunner(txInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	abort := errors.New("abort transaction")
+	err = runner.RunInTx(ctx, func(txCtx context.Context) error {
+		if err := kv.Set(txCtx, "rolled-back", "no", 0); err != nil {
+			return err
+		}
+		if _, err := blob.Put(txCtx, "rolled-back-blob", bytes.NewBufferString("payload")); err != nil {
+			return err
+		}
+		value, hit, err := kv.Get(txCtx, "rolled-back")
+		if err != nil {
+			return fmt.Errorf("read inside transaction: %w", err)
+		}
+		if !hit || value != "no" {
+			return fmt.Errorf("read inside transaction: value=%#v hit=%v", value, hit)
+		}
+		return abort
+	})
+	if !errors.Is(err, abort) {
+		t.Fatalf("transaction error = %v, want abort", err)
+	}
+	if value, hit, err := kv.Get(ctx, "rolled-back"); err != nil || hit {
+		t.Fatalf("rolled-back key: value=%#v hit=%v err=%v", value, hit, err)
+	}
+	if _, hit, err := blob.Get(blobCtx, "rolled-back-blob"); err != nil || hit {
+		t.Fatalf("rolled-back blob: hit=%v err=%v", hit, err)
+	}
+
+	if err := runner.RunInTx(ctx, func(txCtx context.Context) error {
+		return kv.Set(txCtx, "committed", "yes", 0)
+	}); err != nil {
+		t.Fatalf("commit transaction: %v", err)
+	}
+	if value, hit, err := kv.Get(ctx, "committed"); err != nil || !hit || value != "yes" {
+		t.Fatalf("committed key: value=%#v hit=%v err=%v", value, hit, err)
+	}
+}
+
+func TestSQLiteStorageRejectsDifferentTransactionDatabase(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	txInst, err := NewTx().Open(map[string]string{"path": filepath.Join(base, "tx.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txInst.Close()
+	kvInst, err := NewKV().Open(map[string]string{"path": filepath.Join(base, "other.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kvInst.Close()
+	runner, err := storage.AssertTxRunner(txInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv, err := storage.AssertKV(kvInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runner.RunInTx(ctx, func(txCtx context.Context) error {
+		return kv.Set(txCtx, "outside", "must not be written", 0)
+	})
+	if err == nil || !strings.Contains(err.Error(), "transaction database does not match") {
+		t.Fatalf("different database error = %v, want transaction/database mismatch", err)
+	}
+}
+
+func TestSQLiteAtomicKVConcurrentInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "atomic.db")
+	setup, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyEmbeddedMigrations(t, setup)
+	_ = setup.Close()
+	open := func() storage.AtomicKV {
+		t.Helper()
+		inst, err := NewKV().Open(map[string]string{"path": path, "namespace": "atomic"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = inst.Close() })
+		atomicKV, err := storage.AssertAtomicKV(inst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return atomicKV
+	}
+	a, b := open(), open()
+	if err := a.Update(t.Context(), "counter", func(_ any, hit bool) (any, time.Duration, error) {
+		if hit {
+			t.Fatal("first update was not a miss")
+		}
+		return float64(1), time.Hour, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("reject update")
+	if err := a.Update(t.Context(), "counter", func(any, bool) (any, time.Duration, error) { return float64(999), 0, sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("callback error = %v", err)
+	}
+	const workers, iterations = 16, 40
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for w := range workers {
+		wg.Go(func() {
+			store := a
+			if w%2 == 1 {
+				store = b
+			}
+			for range iterations {
+				if err := store.Update(t.Context(), "counter", func(current any, hit bool) (any, time.Duration, error) {
+					if !hit {
+						return nil, 0, errors.New("unexpected miss")
+					}
+					value, ok := current.(float64)
+					if !ok {
+						return nil, 0, fmt.Errorf("counter value has type %T, want float64", current)
+					}
+					return value + 1, time.Hour, nil
+				}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	ctx := t.Context()
+	instance, err := NewKV().Open(map[string]string{"path": path, "namespace": "atomic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	layer, _ := storage.AssertKV(instance)
+	got, hit, err := layer.Get(ctx, "counter")
+	if err != nil || !hit {
+		t.Fatalf("get: hit=%v err=%v", hit, err)
+	}
+	counter, ok := got.(float64)
+	if !ok {
+		t.Fatalf("counter has type %T, want float64", got)
+	}
+	if counter != 1+workers*iterations {
+		t.Fatalf("counter = %v", got)
+	}
+	if err := a.Update(ctx, "short", func(_ any, hit bool) (any, time.Duration, error) {
+		if hit {
+			t.Fatal("short key should miss")
+		}
+		return "ephemeral", time.Millisecond, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := a.Update(ctx, "short", func(_ any, hit bool) (any, time.Duration, error) {
+		if hit {
+			t.Fatal("expired item must be a miss")
+		}
+		return "ok", time.Hour, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

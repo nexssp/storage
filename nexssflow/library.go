@@ -117,19 +117,56 @@ func onPreprocess(b *bundle) compiler.OnPreprocessFunc {
 }
 
 // wrapPipeline injects the per-compilation store into the execution
-// context so generic storage.* actions can resolve `store: "cache"`
-// without a static closure. When there is no store (no @storage in the
-// source), the inner program is returned unchanged.
+// context and, when exactly one tx declaration is present, executes the
+// whole Flow pipeline inside that transaction.
 func wrapPipeline(_ *bundle) compiler.PipelineWrapFunc {
 	return func(meta map[string]any, inner action.AnyAction) (action.AnyAction, error) {
 		s := storeFromMeta(meta)
 		if s == nil {
 			return inner, nil
 		}
+		var txName string
+		for _, decl := range declarationsFromMeta(meta) {
+			if decl.Kind != storage.KindTx {
+				continue
+			}
+			if txName != "" {
+				return nil, storage.BadRequest("storage: a Flow pipeline can declare only one transaction store")
+			}
+			txName = decl.Name
+		}
 		return action.New("storage.wrap",
 			func(ctx context.Context, req any) (any, error) {
-				ctx = storeKey.With(ctx, s)
-				return action.InvokeAny(ctx, inner, req)
+				invoke := func(runCtx context.Context) (any, error) {
+					runCtx = storeKey.With(runCtx, s)
+					return action.InvokeAny(runCtx, inner, req)
+				}
+				if txName == "" {
+					return invoke(ctx)
+				}
+				if activeName, ok := pipelineTransactionKey.From(ctx); ok {
+					if activeName != txName {
+						return nil, storage.BadRequest("storage: nested Flow pipeline selects a different transaction store")
+					}
+					return invoke(ctx)
+				}
+				inst, err := s.instance(txName)
+				if err != nil {
+					return nil, err
+				}
+				runner, err := storage.AssertTxRunner(inst)
+				if err != nil {
+					return nil, err
+				}
+				var result any
+				err = runner.RunInTx(ctx, func(txCtx context.Context) error {
+					txCtx = pipelineTransactionKey.With(txCtx, txName)
+					txCtx = storeKey.With(txCtx, s)
+					var invokeErr error
+					result, invokeErr = action.InvokeAny(txCtx, inner, req)
+					return invokeErr
+				})
+				return result, err
 			}).Build(), nil
 	}
 }

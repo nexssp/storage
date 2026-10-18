@@ -24,6 +24,9 @@ named hook.
 
 noop -> storage.kv.set @{ store: "cache", key: "k", value: "v" }
 noop -> storage.kv.get @{ store: "cache", key: "k" }
+
+# Optional: keep the current request available to the next action.
+cache.kv.get @{ key: .tenant_id, request: . }
 ```
 
 Eight actions: `storage.kv.{get,set,del}`, `storage.blob.{get,put,del}`,
@@ -32,6 +35,12 @@ naming the `@storage` declaration. Blob put accepts streamed input and
 returns an `xfile.Ref`; Blob get is a metadata-only lookup returning
 `{ ref, hit }`, never the payload bytes. All Blob operations require an
 authenticated caller-and-tenant scope in the request context.
+
+KV `get` accepts an optional `request` field. Pass `request: .` to echo the
+current input in the result's `request` field alongside `value` and `hit`; this
+lets downstream actions use both the loaded KV record and the original business
+payload. The field is omitted unless explicitly supplied, preserving the
+existing result shape for current callers.
 
 ### Layer 2 — Middleware wiring (the practical path)
 
@@ -54,6 +63,22 @@ Three modifiers, all wired by the `AtomAdvise` hook:
 
 The store name may contain colons (e.g. `kv:redis`); the TTL is
 parsed from the segment after the last colon.
+
+### Transactional pipeline execution
+
+Declare exactly one `tx` store to run the **whole Flow pipeline** in a transaction. SQL-backed KV and Blob operations participate when they use the same driver and `path`/`dsn` as the transaction store:
+
+```nflow
+@storage tx:sqlite as transaction { path: "./data/app.db" }
+@storage kv:sqlite as customers { path: "./data/app.db" }
+
+noop
+  -> customers.kv.set @{ key: "customer-42", value: "Maks" }
+  -> transaction.tx.run @{ step: "save-customer" }
+  -> customers.kv.get @{ key: "customer-42" }
+```
+
+`tx.run` is an optional assertion that the transaction scope is active; it does not open a nested transaction. A pipeline error rolls back and success commits. A mismatched SQL database is rejected rather than used outside the transaction. Apply the adapter's embedded Goose migration explicitly before running a SQLite/PostgreSQL example. The in-memory `tx` backend is only a test double and does not provide atomicity or rollback. A pipeline can declare only one transaction store.
 
 ### Layer 3 — Hook observation
 
@@ -97,12 +122,15 @@ nflow run nflows/dedup.nflow          # :dedup_store= pattern
 ## Tests
 
 ```sh
-go test -race ./...
+task test
+task test -- ./nexssflow
+task ci
 ```
 
 The advisor tests (`advise_test.go`) prove the middleware wiring
 works end-to-end: a `:cached=` modifier causes the second call to be
-served from cache with zero handler invocations.
+served from cache with zero handler invocations. Transaction integration
+tests run a Flow pipeline against SQLite and verify both commit and rollback.
 
 ## Why this lives in nexssp/storage/nexssflow/, not in flow/extensions/
 

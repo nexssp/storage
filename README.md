@@ -63,6 +63,10 @@ Memory provides a reference implementation for all eight kinds. Persistent backe
 | [`postgres`](postgres/) | `kv`, `blob`, `tx` | `dsn`, optional `namespace`, KV `ttl` |
 | [`redis`](redis/) | `kv`, `blob`, `lock` | `addr`, optional credentials/database/namespace, KV `ttl` |
 
+## Optional atomic KV updates
+
+KV instances may additionally implement `storage.AtomicKV` (`storage.AssertAtomicKV`). `Update` serializes a single namespace/key read-modify-write and invokes its callback under the backend transaction/lock; callback errors do not persist a value. Expired values are misses. The callback TTL follows `Set` semantics (non-positive uses the backend default; no default means no expiry). SQLite and PostgreSQL SQL adapters support this capability; ordinary `CacheLayer` behavior is unchanged. In an ambient SQL transaction, a callback error rolls back only the update's savepoint and the surrounding transaction remains usable. SQLite defaults to a 5-second busy timeout for lock contention, so concurrent writers wait for the short transaction instead of failing immediately; an explicit `_busy_timeout`/`_timeout` in the driver DSN is respected.
+
 ## Nexss Flow 🌀 integration
 
 The Flow bundle registers the built-in memory, SQLite, PostgreSQL, and Redis backends. Declare a store with `@storage <kind>:<backend> as <alias>`; the alias becomes a statically checked action namespace.
@@ -82,7 +86,21 @@ The aliased action surfaces are `kv.{get,set,del}`, `blob.{put,get,del}`, `lock.
 
 Blob reads return a compact `{ ref, hit }` result, not payload bytes. Blob operations require authenticated caller-and-tenant scope in the Flow execution context. Basic locks are best-effort and non-fenced.
 
-> **WIP — Flow parity:** `tx.run` currently invokes `TxRunner` with an empty callback; it does not run Flow pipeline storage operations inside that transaction. The Flow fenced-lock namespace does not expose lease renewal, and the generic `storage.*` namespace is limited to KV, Blob, and Lock. Use the Go contracts for these unsupported Flow patterns until their Flow wiring is implemented.
+### Transactional Flow pipelines
+
+Exactly one `@storage tx:<backend>` declaration wraps the entire compiled Flow pipeline in `TxRunner.RunInTx`. SQL-backed KV and Blob operations in that pipeline participate in the transaction when their driver and `path`/`dsn` match the transaction declaration. A different SQL database is rejected rather than silently written outside the transaction. A Flow error rolls back the transaction; success commits it. `tx.run` is an optional in-pipeline assertion that the declared transaction is active; it does not start a nested transaction.
+
+```nflow
+@storage tx:sqlite as transaction { path: "./data/app.db" }
+@storage kv:sqlite as customers { path: "./data/app.db" }
+
+noop
+  -> customers.kv.set @{ key: "customer-42", value: "Maks" }
+  -> transaction.tx.run @{ step: "save-customer" }
+  -> customers.kv.get @{ key: "customer-42" }
+```
+
+Apply the adapter's embedded Goose migration before executing this example; opening a backend never creates the schema. Only one transaction store may be declared per pipeline. The in-memory `tx` backend is a test double and does not provide rollback or atomicity. The Flow fenced-lock namespace still does not expose lease renewal, and the generic `storage.*` namespace is limited to KV, Blob, and Lock.
 
 Runnable ecosystem examples now live in the [Nexss examples repository](https://github.com/nexssp/examples).
 

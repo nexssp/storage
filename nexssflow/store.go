@@ -14,6 +14,12 @@ import (
 // find it without a runtime `store:` argument.
 var storeKey = xctx.NewKey[*store]("storage.store")
 
+// pipelineTransactionKey identifies the tx declaration currently
+// wrapping a Flow pipeline. The aliased tx.run action uses it as an
+// explicit in-pipeline assertion; transaction boundaries are established
+// by WrapPipeline, not by an individual action.
+var pipelineTransactionKey = xctx.NewKey[string]("storage.pipeline_transaction")
+
 // bundle owns the backend registry (shared, read-only after init) and
 // tracks every per-compilation store so Shutdown can close them.
 type bundle struct {

@@ -198,8 +198,30 @@ func TestMaterializedActions_AreCallable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoAny: %v", err)
 	}
-	if m, ok := res.(kvSetRes); !ok || !m.OK {
+	if setRes, setOK := res.(kvSetRes); !setOK || !setRes.OK {
 		t.Fatalf("set result: %+v", res)
+	}
+
+	getAct, ok := mock.actions["cache.kv.get"]
+	if !ok {
+		t.Fatal("cache.kv.get not mounted")
+	}
+	request := map[string]any{"tenant_id": "tn_acme", "prompt": "hello"}
+	res, err = getAct.DoAny(context.Background(), map[string]any{
+		"key": "k", "request": request,
+	})
+	if err != nil {
+		t.Fatalf("get DoAny: %v", err)
+	}
+	got, ok := res.(kvGetRes)
+	if !ok || !got.Hit || got.Value != "v" {
+		t.Fatalf("get result: %#v", res)
+	}
+	if got.Request == nil {
+		t.Fatal("get result dropped the explicitly supplied request")
+	}
+	if gotRequest, ok := got.Request.(map[string]any); !ok || gotRequest["tenant_id"] != "tn_acme" || gotRequest["prompt"] != "hello" {
+		t.Fatalf("get request passthrough = %#v", got.Request)
 	}
 }
 
@@ -245,6 +267,48 @@ func TestWrapPipeline_NoStoreIsNoOp(t *testing.T) {
 	}
 	if wrapped != inner {
 		t.Fatal("expected pass-through when no store is present")
+	}
+}
+
+func TestWrapPipeline_PropagatesTransactionScope(t *testing.T) {
+	b := newBundle()
+	meta := map[string]any{
+		"storage": []storage.Declaration{
+			{Name: "tx", Backend: "memory", Kind: storage.KindTx},
+		},
+	}
+	onPreprocess(b)(meta)
+	inner := action.New("test.transaction_scope", func(ctx context.Context, _ any) (string, error) {
+		activeName, active := pipelineTransactionKey.From(ctx)
+		store, hasStore := storeFromContext(ctx)
+		if !active || activeName != "tx" || !hasStore || store != storeFromMeta(meta) {
+			return "", storage.Internal("transaction context was not propagated")
+		}
+		return activeName, nil
+	}).Build()
+
+	wrapped, err := wrapPipeline(b)(meta, inner)
+	if err != nil {
+		t.Fatalf("wrap pipeline: %v", err)
+	}
+	result, err := action.InvokeAny(context.Background(), wrapped, nil)
+	if err != nil || result != "tx" {
+		t.Fatalf("wrapped pipeline result=%#v err=%v, want tx", result, err)
+	}
+}
+
+func TestWrapPipeline_RejectsMultipleTransactionStores(t *testing.T) {
+	b := newBundle()
+	meta := map[string]any{
+		"storage": []storage.Declaration{
+			{Name: "first", Backend: "memory", Kind: storage.KindTx},
+			{Name: "second", Backend: "memory", Kind: storage.KindTx},
+		},
+	}
+	onPreprocess(b)(meta)
+	inner := action.New("test.inner", func(_ context.Context, input any) (any, error) { return input, nil }).Build()
+	if _, err := wrapPipeline(b)(meta, inner); err == nil || !strings.Contains(err.Error(), "only one transaction store") {
+		t.Fatalf("multiple transaction stores error = %v, want ambiguity error", err)
 	}
 }
 

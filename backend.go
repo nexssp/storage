@@ -371,10 +371,9 @@ func (r *Registry) openLocked(backendName string, kind Kind, opts map[string]str
 		// Already-classified errors pass through; wrap unknown ones as
 		// Unavailable so the kind travels with the cause.
 		//
-		//nolint:errcheck // errors.AsType returns (target, bool); the
-		// target is intentionally discarded because the original wrapped
-		// err is returned to preserve the full unwrap chain for callers.
-		if _, isAppErr := errors.AsType[*xerr.AppError](err); isAppErr {
+		// errors.AsType returns (target, bool); the target is intentionally
+		// discarded because the original wrapped err preserves its full chain.
+		if _, ok := errors.AsType[*xerr.AppError](err); ok { //nolint:errcheck // only ok is used
 			return nil, err
 		}
 		return nil, Unavailablef(err, "storage: open %q failed", backendName)
@@ -423,6 +422,25 @@ func AssertKV(inst Instance) (action.CacheLayer[any], error) {
 		return nil, Internalf("storage: backend %q did not implement action.CacheLayer[any]", inst.Kind())
 	}
 	return layer, nil
+}
+
+// AtomicKV is an optional KV capability for serialized single-key read/modify/write.
+// The callback runs while the backend holds the key's transaction/lock; an error
+// leaves the stored value unchanged. Expired values are presented as misses.
+type AtomicKV interface {
+	Update(ctx context.Context, key string, fn func(current any, hit bool) (next any, ttl time.Duration, err error)) error
+}
+
+// AssertAtomicKV asserts that inst provides the optional atomic KV capability.
+func AssertAtomicKV(inst Instance) (AtomicKV, error) {
+	if inst.Kind() != KindKV {
+		return nil, BadRequestf("storage: instance is kind %q, expected %q", inst.Kind(), KindKV)
+	}
+	store, ok := inst.(AtomicKV)
+	if !ok {
+		return nil, Internalf("storage: backend %q does not support AtomicKV", inst.Kind())
+	}
+	return store, nil
 }
 
 // AssertBlob asserts that inst satisfies BlobStore.

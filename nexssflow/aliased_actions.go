@@ -26,7 +26,8 @@ import (
 // ---------------------------------------------------------------------------
 
 type aliasedKVGetReq struct {
-	Key string `json:"key"`
+	Key     string `json:"key"`
+	Request any    `json:"request,omitempty"`
 }
 
 func aliasedKVGet(s *store, storeName string) action.AnyAction {
@@ -51,9 +52,9 @@ func aliasedKVGet(s *store, storeName string) action.AnyAction {
 			} else {
 				recordStorageEvent(ctx, "cache_miss", storeName, storeName+".kv.get", req.Key)
 			}
-			return kvGetRes{Value: val, Hit: hit}, nil
+			return kvGetRes{Value: val, Hit: hit, Request: req.Request}, nil
 		}).
-		Description("Get a value from "+storeName).
+		Description("Get a value from "+storeName+" and optionally pass through the request").
 		Tag("storage", "kv", "get").
 		Build()
 }
@@ -571,7 +572,7 @@ func aliasedJournalRecord(s *store, storeName string) action.AnyAction {
 // Tx aliased action — <alias>.tx.run
 // ---------------------------------------------------------------------------
 
-func aliasedTxRun(s *store, storeName string) action.AnyAction {
+func aliasedTxRun(_ *store, storeName string) action.AnyAction {
 	return action.New(storeName+".tx.run",
 		func(ctx context.Context, _ struct {
 			Step string `json:"step"`
@@ -579,29 +580,17 @@ func aliasedTxRun(s *store, storeName string) action.AnyAction {
 			OK bool `json:"ok"`
 		}, error,
 		) {
-			inst, err := s.instance(storeName)
-			if err != nil {
+			activeName, ok := pipelineTransactionKey.From(ctx)
+			if !ok || activeName != storeName {
 				return struct {
 					OK bool `json:"ok"`
-				}{}, err
-			}
-			runner, err := storage.AssertTxRunner(inst)
-			if err != nil {
-				return struct {
-					OK bool `json:"ok"`
-				}{}, err
-			}
-			err = runner.RunInTx(ctx, func(_ context.Context) error { return nil })
-			if err != nil {
-				return struct {
-					OK bool `json:"ok"`
-				}{}, storage.Unavailable("tx.run failed", err)
+				}{}, storage.BadRequest("tx.run must execute inside its declared Flow pipeline transaction")
 			}
 			return struct {
 				OK bool `json:"ok"`
 			}{OK: true}, nil
 		}).
-		Description("Run in a transaction on "+storeName).
+		Description("Confirm the Flow pipeline transaction for "+storeName+" is active").
 		Tag("storage", "tx", "run").
 		Build()
 }

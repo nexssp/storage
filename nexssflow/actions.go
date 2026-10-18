@@ -64,13 +64,15 @@ func buildLibrary() action.Library {
 // ---------------------------------------------------------------------------
 
 type kvGetReq struct {
-	Store string `json:"store"`
-	Key   string `json:"key"`
+	Store   string `json:"store"`
+	Key     string `json:"key"`
+	Request any    `json:"request,omitempty"`
 }
 
 type kvGetRes struct {
-	Value any  `json:"value"`
-	Hit   bool `json:"hit"`
+	Value   any  `json:"value"`
+	Hit     bool `json:"hit"`
+	Request any  `json:"request,omitempty"`
 }
 
 func kvGetAction() action.AnyAction {
@@ -100,9 +102,9 @@ func kvGetAction() action.AnyAction {
 			} else {
 				recordStorageEvent(ctx, "cache_miss", req.Store, "storage.kv.get", req.Key)
 			}
-			return kvGetRes{Value: val, Hit: hit}, nil
+			return kvGetRes{Value: val, Hit: hit, Request: req.Request}, nil
 		}).
-		Description("Get a value from a KV store; emits cache_hit/cache_miss events").
+		Description("Get a KV value and optionally pass through the request; emits cache_hit/cache_miss events").
 		Tag("storage", "kv", "get").
 		Build()
 }
