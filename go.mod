@@ -5,7 +5,7 @@ go 1.26.9
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/nexssp/flow v0.34.0
+	github.com/nexssp/flow v0.38.0
 	github.com/nexssp/kernel v0.35.0
 	github.com/redis/go-redis/v9 v9.23.0
 	modernc.org/sqlite v1.60.1
@@ -19,7 +19,7 @@ require (
 	github.com/expr-lang/expr v1.17.8 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
 	github.com/go-playground/locales v0.14.2 // indirect
 	github.com/go-playground/universal-translator v0.18.2 // indirect
 	github.com/go-playground/validator/v10 v10.30.5 // indirect
