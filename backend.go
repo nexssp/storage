@@ -371,9 +371,8 @@ func (r *Registry) openLocked(backendName string, kind Kind, opts map[string]str
 		// Already-classified errors pass through; wrap unknown ones as
 		// Unavailable so the kind travels with the cause.
 		//
-		// errors.AsType returns (target, bool); the target is intentionally
-		// discarded because the original wrapped err preserves its full chain.
-		if _, ok := errors.AsType[*xerr.AppError](err); ok { //nolint:errcheck // only ok is used
+		// Preserve the original error chain rather than returning appErr.
+		if appErr, ok := errors.AsType[*xerr.AppError](err); ok && appErr != nil {
 			return nil, err
 		}
 		return nil, Unavailablef(err, "storage: open %q failed", backendName)
