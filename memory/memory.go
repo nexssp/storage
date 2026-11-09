@@ -28,6 +28,7 @@ import (
 
 	"github.com/nexssp/storage"
 	"github.com/nexssp/storage/blobref"
+	"github.com/nexssp/storage/internal/tenantkey"
 )
 
 // backendName is the Name() value shared by every in-process backend
@@ -51,23 +52,28 @@ func validateOptions(opts map[string]string, allowed ...string) error {
 // KV is the in-memory CacheLayer backend.
 type KV struct{}
 
-// NewKV returns a KV backend.
+// NewKV returns a KV backend. Options: ttl and tenant_scope="tenant" for
+// context-derived tenant key isolation.
 func NewKV() *KV { return &KV{} }
 
 func (KV) Name() string       { return backendName }
 func (KV) Kind() storage.Kind { return storage.KindKV }
 
 func (KV) Open(opts map[string]string) (storage.Instance, error) {
-	if err := validateOptions(opts, "ttl"); err != nil {
+	if err := validateOptions(opts, "ttl", "tenant_scope"); err != nil {
 		return nil, err
+	}
+	if opts["tenant_scope"] != "" && opts["tenant_scope"] != "tenant" {
+		return nil, storage.BadRequestf("memory: invalid tenant_scope %q", opts["tenant_scope"])
 	}
 	ttl, err := storage.ParseDuration(opts["ttl"], 0)
 	if err != nil {
 		return nil, err
 	}
 	return &kvInstance{
-		data: make(map[string]kvItem),
-		ttl:  ttl,
+		data:         make(map[string]kvItem),
+		ttl:          ttl,
+		tenantScoped: opts["tenant_scope"] == "tenant",
 	}, nil
 }
 
@@ -77,17 +83,24 @@ type kvItem struct {
 }
 
 type kvInstance struct {
-	mu   sync.RWMutex
-	data map[string]kvItem
-	ttl  time.Duration
+	mu           sync.RWMutex
+	data         map[string]kvItem
+	ttl          time.Duration
+	tenantScoped bool
 }
 
 func (k *kvInstance) Kind() storage.Kind { return storage.KindKV }
 func (k *kvInstance) Close() error       { return nil }
 
 func (k *kvInstance) Get(ctx context.Context, key string) (val any, hit bool, err error) {
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, false, ctxErr
+	}
+	if k.tenantScoped {
+		key, err = tenantkey.Key(ctx, key)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	now := time.Now()
 
@@ -113,6 +126,13 @@ func (k *kvInstance) Set(ctx context.Context, key string, val any, ttl time.Dura
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if k.tenantScoped {
+		var err error
+		key, err = tenantkey.Key(ctx, key)
+		if err != nil {
+			return err
+		}
+	}
 	var exp time.Time
 	now := time.Now()
 	switch {
@@ -133,6 +153,13 @@ func (k *kvInstance) Set(ctx context.Context, key string, val any, ttl time.Dura
 func (k *kvInstance) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if k.tenantScoped {
+		var err error
+		key, err = tenantkey.Key(ctx, key)
+		if err != nil {
+			return err
+		}
 	}
 	k.mu.Lock()
 	delete(k.data, key)

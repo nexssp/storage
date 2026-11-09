@@ -20,7 +20,8 @@ import (
 var migrationFiles embed.FS
 
 // NewKV returns a PostgreSQL KV backend. Options: dsn (required), namespace,
-// and ttl. Run the embedded migrations before using its methods.
+// ttl, and tenant_scope="tenant" for context-derived tenant key isolation.
+// Run the embedded migrations before using its methods.
 func NewKV() storage.Backend {
 	return sqladapter.NewBackend("postgres", "pgx", storage.KindKV, "dsn")
 }

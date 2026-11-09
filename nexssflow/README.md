@@ -110,6 +110,10 @@ and observability probes read it via `HookProbeKey`.
 - `as <alias>` — optional. Renames the store for this compilation.
 - `{ options }` — optional. Backend-specific key/value pairs.
 
+For KV stores, `tenant_scope: "tenant"` enables per-tenant key isolation on supported backends. The host must place a tenant ID from trusted authentication/tenant resolution into the request context before the Flow runs; never derive it directly from user-controlled input. See [tenant-scoped KV](../docs/tenant-scoped-kv.md).
+
+If a KV action runs without a tenant ID in the context, it fails with `xerr.KindUnauthorized` via `storage.Unauthorized`; there is no fallback to shared keys.
+
 ## Fixtures
 
 ```sh

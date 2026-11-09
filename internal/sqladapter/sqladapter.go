@@ -24,6 +24,7 @@ import (
 
 	"github.com/nexssp/storage"
 	"github.com/nexssp/storage/blobref"
+	"github.com/nexssp/storage/internal/tenantkey"
 )
 
 // Backend adapts one SQL driver and storage kind to the storage contract.
@@ -43,14 +44,27 @@ func NewBackend(name, driver string, kind storage.Kind, option string) *Backend 
 func (b *Backend) Name() string       { return b.name }
 func (b *Backend) Kind() storage.Kind { return b.kind }
 
+func (b *Backend) optionAllowed(key string) bool {
+	switch key {
+	case b.option:
+		return true
+	case "namespace":
+		return b.kind == storage.KindKV || b.kind == storage.KindBlob
+	case "ttl", "tenant_scope":
+		return b.kind == storage.KindKV
+	default:
+		return false
+	}
+}
+
 func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 	for key := range opts {
-		allowed := key == b.option ||
-			key == "namespace" && (b.kind == storage.KindKV || b.kind == storage.KindBlob) ||
-			key == "ttl" && b.kind == storage.KindKV
-		if !allowed {
+		if !b.optionAllowed(key) {
 			return nil, storage.BadRequestf("%s: unknown option %q", b.name, key)
 		}
+	}
+	if opts["tenant_scope"] != "" && opts["tenant_scope"] != "tenant" {
+		return nil, storage.BadRequestf("%s: invalid tenant_scope %q", b.name, opts["tenant_scope"])
 	}
 	addr := opts[b.option]
 	if addr == "" {
@@ -85,13 +99,14 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 		namespace = "default"
 	}
 	inst := &instance{
-		db:         db,
-		name:       b.name,
-		kind:       b.kind,
-		namespace:  namespace,
-		defaultTTL: ttl,
-		postgres:   b.driver == "pgx",
-		databaseID: databaseIdentity(b.driver, opts[b.option]),
+		db:           db,
+		name:         b.name,
+		kind:         b.kind,
+		namespace:    namespace,
+		defaultTTL:   ttl,
+		postgres:     b.driver == "pgx",
+		databaseID:   databaseIdentity(b.driver, opts[b.option]),
+		tenantScoped: opts["tenant_scope"] == "tenant",
 	}
 	if b.kind == storage.KindBlob {
 		return &blobInstance{instance: inst}, nil
@@ -176,15 +191,16 @@ func hasSQLiteBusyTimeout(addr string) bool {
 }
 
 type instance struct {
-	db         *sql.DB
-	name       string
-	kind       storage.Kind
-	namespace  string
-	defaultTTL time.Duration
-	postgres   bool
-	databaseID [32]byte
-	closeOnce  sync.Once
-	closeErr   error
+	db           *sql.DB
+	name         string
+	kind         storage.Kind
+	namespace    string
+	defaultTTL   time.Duration
+	postgres     bool
+	databaseID   [32]byte
+	tenantScoped bool
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 type sqlExecutor interface {
@@ -229,6 +245,13 @@ func (i *instance) Close() error {
 	return nil
 }
 
+func (i *instance) storageKey(ctx context.Context, key string) (string, error) {
+	if i.tenantScoped {
+		return tenantkey.Key(ctx, key)
+	}
+	return key, nil
+}
+
 func (i *instance) placeholder(n int) string {
 	if i.postgres {
 		return fmt.Sprintf("$%d", n)
@@ -244,6 +267,10 @@ func (i *instance) table() string {
 }
 
 func (i *instance) Get(ctx context.Context, key string) (value any, hit bool, resultErr error) {
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return nil, false, err
+	}
 	raw, hit, err := i.getRaw(ctx, key)
 	if err != nil || !hit {
 		return nil, hit, err
@@ -254,6 +281,8 @@ func (i *instance) Get(ctx context.Context, key string) (value any, hit bool, re
 	return value, true, nil
 }
 
+// getRaw reads a value by key. The caller must pass a key already transformed
+// by i.storageKey; this low-level method does not apply tenant scoping.
 func (i *instance) getRaw(ctx context.Context, key string) (raw []byte, hit bool, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -291,6 +320,10 @@ func (i *instance) Update(ctx context.Context, key string, fn func(any, bool) (a
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return err
+	}
 	if fn == nil {
 		return storage.BadRequest("sql storage: atomic update callback is required")
 	}
@@ -304,10 +337,10 @@ func (i *instance) Update(ctx context.Context, key string, fn func(any, bool) (a
 	if ambient {
 		tx = binding.tx
 	} else {
-		var err error
-		tx, err = i.db.BeginTx(ctx, nil)
-		if err != nil {
-			return storage.Unavailablef(err, "sql storage: begin atomic update")
+		var beginErr error
+		tx, beginErr = i.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return storage.Unavailablef(beginErr, "sql storage: begin atomic update")
 		}
 		txctx = context.WithValue(ctx, txContextKey{}, txBinding{tx: tx, databaseID: i.databaseID})
 		owned = true
@@ -329,19 +362,19 @@ func (i *instance) Update(ctx context.Context, key string, fn func(any, bool) (a
 	}
 	if i.postgres {
 		// hashtextextended is stable within PostgreSQL and collisions only serialize unrelated keys.
-		if _, err := tx.ExecContext(txctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", fmt.Sprintf("%d:%s%s", len(i.namespace), i.namespace, key)); err != nil {
-			return finish(storage.Unavailablef(err, "sql storage: lock atomic key"))
+		if _, lockErr := tx.ExecContext(txctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", fmt.Sprintf("%d:%s%s", len(i.namespace), i.namespace, key)); lockErr != nil {
+			return finish(storage.Unavailablef(lockErr, "sql storage: lock atomic key"))
 		}
 	} else {
 		// Any UPDATE starts SQLite's write transaction before reading, preventing stale reads across connections/processes.
-		if _, err := tx.ExecContext(txctx, "UPDATE nexss_storage_kv SET value=value WHERE namespace=? AND key=?", i.namespace, key); err != nil {
-			return finish(storage.Unavailablef(err, "sql storage: lock atomic key"))
+		if _, lockErr := tx.ExecContext(txctx, "UPDATE nexss_storage_kv SET value=value WHERE namespace=? AND key=?", i.namespace, key); lockErr != nil {
+			return finish(storage.Unavailablef(lockErr, "sql storage: lock atomic key"))
 		}
 	}
 	savepoint := "storage_atomic_" + strconv.FormatUint(savepointSequence.Add(1), 10)
 	if ambient {
-		if _, err := tx.ExecContext(txctx, "SAVEPOINT "+savepoint); err != nil {
-			return finish(storage.Unavailablef(err, "sql storage: create atomic savepoint"))
+		if _, savepointErr := tx.ExecContext(txctx, "SAVEPOINT "+savepoint); savepointErr != nil {
+			return finish(storage.Unavailablef(savepointErr, "sql storage: create atomic savepoint"))
 		}
 	}
 	raw, hit, err := i.getRaw(txctx, key)
@@ -388,6 +421,10 @@ func (i *instance) Set(ctx context.Context, key string, value any, ttl time.Dura
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return storage.BadRequestf("sql storage: encode value: %v", err)
@@ -419,6 +456,10 @@ func (i *instance) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return err
+	}
 	q := "DELETE FROM " + i.table() + " WHERE namespace=" + i.placeholder(1) + " AND key=" + i.placeholder(2)
 	if err := i.exec(ctx, q, i.namespace, key); err != nil {
 		return storage.Unavailablef(err, "sql storage: delete key")
@@ -427,6 +468,10 @@ func (i *instance) Delete(ctx context.Context, key string) error {
 }
 
 func (i *instance) Put(ctx context.Context, key string, data []byte) error {
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return err
+	}
 	return i.put(ctx, key, data, 0)
 }
 

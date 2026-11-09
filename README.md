@@ -59,15 +59,19 @@ Memory provides a reference implementation for all eight kinds. Its rate limiter
 
 | Package | Kinds | Main options |
 | --- | --- | --- |
-| [`sqlite`](sqlite/) | `kv`, `blob`, `tx` | `path`, optional `namespace`, KV `ttl` |
-| [`postgres`](postgres/) | `kv`, `blob`, `tx` | `dsn`, optional `namespace`, KV `ttl` |
-| [`redis`](redis/) | `kv`, `blob`, `lock` | `addr`, optional credentials/database/namespace, KV `ttl` |
+| [`sqlite`](sqlite/) | `kv`, `blob`, `tx` | `path`, optional `namespace`, KV `ttl` and `tenant_scope` |
+| [`postgres`](postgres/) | `kv`, `blob`, `tx` | `dsn`, optional `namespace`, KV `ttl` and `tenant_scope` |
+| [`redis`](redis/) | `kv`, `blob`, `lock` | `addr`, optional credentials/database/namespace, KV `ttl` and `tenant_scope` |
 
 PostgreSQL transaction matching uses the exact configured DSN string. A `tx` declaration and any participating PostgreSQL KV or Blob declaration must use identical DSN strings, including query parameters and their order; different strings are treated as different database identities even if they connect to the same server and database. Reuse the same DSN value across those declarations. Redis lock instances track at most 4096 distinct locally owned active keys; expired entries are pruned, and a new distinct acquisition returns `Unavailable` while the local owner table is full.
 
 ## Optional atomic KV updates
 
 KV instances may additionally implement `storage.AtomicKV` (`storage.AssertAtomicKV`). `Update` serializes a single namespace/key read-modify-write and invokes its callback under the backend transaction/lock; callback errors do not persist a value. Expired values are misses. The callback TTL follows `Set` semantics (non-positive uses the backend default; no default means no expiry). SQLite and PostgreSQL SQL adapters support this capability; ordinary `CacheLayer` behavior is unchanged. In an ambient SQL transaction, a callback error rolls back only the update's savepoint and the surrounding transaction remains usable. SQLite configures a 5-second busy timeout with `_pragma=busy_timeout(5000)` unless the DSN already specifies `_pragma`, `_busy_timeout`, or `_timeout`.
+
+## Optional tenant-scoped KV
+
+Set `tenant_scope: "tenant"` on a KV declaration to derive each key from the tenant ID in the trusted request context. Memory, SQLite, PostgreSQL, and Redis support this option; missing tenant context is rejected, while omitting the option preserves the existing shared-key behavior. KV entries are shared by callers within the same tenant. This does not resolve tenants or replace tenant filtering in application-owned GORM repositories. See [tenant-scoped KV](docs/tenant-scoped-kv.md) for migration and namespace cautions.
 
 ## Nexss Flow 🌀 integration
 

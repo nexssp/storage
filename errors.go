@@ -29,6 +29,16 @@ func BadRequestf(format string, args ...any) error {
 	return xerr.BadRequest(fmt.Sprintf(format, args...))
 }
 
+// Unauthorized wraps xerr.Unauthorized. Use when a trusted tenant context is required.
+func Unauthorized(msg string) error {
+	return xerr.Unauthorized(msg)
+}
+
+// Unauthorizedf is the printf-style variant.
+func Unauthorizedf(format string, args ...any) error {
+	return xerr.Unauthorized(fmt.Sprintf(format, args...))
+}
+
 // NotFound wraps xerr.NotFound. Use for missing declarations,
 // missing backends, missing keys (when "missing" is not the
 // expected hit path).

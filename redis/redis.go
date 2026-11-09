@@ -22,6 +22,7 @@ import (
 
 	"github.com/nexssp/storage"
 	"github.com/nexssp/storage/blobref"
+	"github.com/nexssp/storage/internal/tenantkey"
 )
 
 const backendName = "redis"
@@ -30,6 +31,7 @@ const maxLockOwners = 4096
 
 type Backend struct{ kind storage.Kind }
 
+// NewKV returns a Redis KV backend. tenant_scope="tenant" enables per-tenant key isolation.
 func NewKV() *Backend   { return &Backend{kind: storage.KindKV} }
 func NewBlob() *Backend { return &Backend{kind: storage.KindBlob} }
 func NewLock() *Backend { return &Backend{kind: storage.KindLock} }
@@ -41,9 +43,16 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 	for key := range opts {
 		switch key {
 		case "addr", "username", "password", "db", "namespace", "ttl":
+		case "tenant_scope":
+			if b.kind != storage.KindKV {
+				return nil, storage.BadRequestf("redis: option %q is only valid for KV", key)
+			}
 		default:
 			return nil, storage.BadRequestf("redis: unknown option %q", key)
 		}
+	}
+	if opts["tenant_scope"] != "" && opts["tenant_scope"] != "tenant" {
+		return nil, storage.BadRequestf("redis: invalid tenant_scope %q", opts["tenant_scope"])
 	}
 	if opts["addr"] == "" {
 		return nil, storage.BadRequest("redis: \"addr\" is required")
@@ -80,7 +89,7 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 		_ = client.Close()
 		return nil, storage.Unavailablef(err, "redis: connect")
 	}
-	inst := &instance{client: client, kind: b.kind, prefix: prefix, defaultTTL: ttl, owners: make(map[string]lockOwner)}
+	inst := &instance{client: client, kind: b.kind, prefix: prefix, defaultTTL: ttl, tenantScoped: opts["tenant_scope"] == "tenant", owners: make(map[string]lockOwner)}
 	if b.kind == storage.KindBlob {
 		return &blobInstance{instance: inst}, nil
 	}
@@ -97,15 +106,16 @@ func Register(reg *storage.Registry) error {
 }
 
 type instance struct {
-	client     *goredis.Client
-	kind       storage.Kind
-	prefix     string
-	defaultTTL time.Duration
-	mu         sync.Mutex
-	owners     map[string]lockOwner
-	pending    int
-	closeOnce  sync.Once
-	closeErr   error
+	client       *goredis.Client
+	kind         storage.Kind
+	prefix       string
+	defaultTTL   time.Duration
+	tenantScoped bool
+	mu           sync.Mutex
+	owners       map[string]lockOwner
+	pending      int
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 type lockOwner struct {
@@ -146,7 +156,18 @@ func (i *instance) valueKey(key string) string {
 	return i.key("kv:" + key)
 }
 
+func (i *instance) storageKey(ctx context.Context, key string) (string, error) {
+	if i.tenantScoped {
+		return tenantkey.Key(ctx, key)
+	}
+	return key, nil
+}
+
 func (i *instance) Get(ctx context.Context, key string) (value any, hit bool, resultErr error) {
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return nil, false, err
+	}
 	raw, hit, err := i.getRaw(ctx, key)
 	if err != nil || !hit {
 		return nil, hit, err
@@ -157,6 +178,8 @@ func (i *instance) Get(ctx context.Context, key string) (value any, hit bool, re
 	return value, true, nil
 }
 
+// getRaw reads a value by key. The caller must pass a key already transformed
+// by i.storageKey; this low-level method does not apply tenant scoping.
 func (i *instance) getRaw(ctx context.Context, key string) (value []byte, hit bool, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -175,6 +198,10 @@ func (i *instance) Set(ctx context.Context, key string, value any, ttl time.Dura
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return storage.BadRequestf("redis: encode value: %v", err)
@@ -191,6 +218,10 @@ func (i *instance) Set(ctx context.Context, key string, value any, ttl time.Dura
 // Delete is an extension to CacheLayer exposed for Flow's kv.del action.
 func (i *instance) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key, err := i.storageKey(ctx, key)
+	if err != nil {
 		return err
 	}
 	if err := i.client.Del(ctx, i.valueKey(key)).Err(); err != nil {

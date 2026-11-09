@@ -401,3 +401,95 @@ func TestSQLiteAtomicKVConcurrentInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestSQLiteKV_TenantScope intentionally mixes scoped and unscoped instances over the same
+// namespace to prove that derived keys cannot collide with legacy keys. Production code
+// should still avoid mixing them for operational clarity.
+func TestSQLiteKV_TenantScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tenant-scope.db")
+	migrator, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyEmbeddedMigrations(t, migrator)
+	if err := migrator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unscopedInstance, err := NewKV().Open(map[string]string{"path": path, "namespace": "tenant-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unscopedInstance.Close()
+	unscopedKV, err := storage.AssertKV(unscopedInstance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unscopedKV.Set(context.Background(), "migration-key", "legacy", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := NewKV().Open(map[string]string{"path": path, "namespace": "tenant-test", "tenant_scope": "tenant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	kv, err := storage.AssertKV(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicKV, err := storage.AssertAtomicKV(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantA := xctx.WithTenantID(context.Background(), "tenant-a")
+	tenantB := xctx.WithTenantID(context.Background(), "tenant-b")
+	if value, hit, err := kv.Get(tenantA, "migration-key"); err != nil || hit {
+		t.Fatalf("scoped store must not read an unscoped value: value=%v hit=%v err=%v", value, hit, err)
+	}
+	if value, hit, err := unscopedKV.Get(context.Background(), "migration-key"); err != nil || !hit || value != "legacy" {
+		t.Fatalf("enabling tenant scope must preserve unscoped data: value=%v hit=%v err=%v", value, hit, err)
+	}
+	if _, _, err := kv.Get(context.Background(), "key"); err == nil {
+		t.Fatal("expected missing tenant context to fail")
+	}
+	if err := kv.Set(context.Background(), "key", "value", 0); err == nil {
+		t.Fatal("expected Set without tenant context to fail")
+	}
+	if err := atomicKV.Update(context.Background(), "key", func(any, bool) (any, time.Duration, error) {
+		return "value", 0, nil
+	}); err == nil {
+		t.Fatal("expected AtomicKV.Update without tenant context to fail")
+	}
+	deleter, ok := inst.(interface {
+		Delete(context.Context, string) error
+	})
+	if !ok {
+		t.Fatal("KV instance does not implement Delete")
+	}
+	if err := deleter.Delete(context.Background(), "key"); err == nil {
+		t.Fatal("expected Delete without tenant context to fail")
+	}
+	if err := kv.Set(tenantA, "key", "a", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit, err := kv.Get(tenantB, "key"); err != nil || hit {
+		t.Fatalf("tenant B must not see tenant A's key: hit=%v err=%v", hit, err)
+	}
+	if err := atomicKV.Update(tenantB, "key", func(_ any, hit bool) (any, time.Duration, error) {
+		if hit {
+			return nil, 0, errors.New("tenant B unexpectedly saw tenant A's value")
+		}
+		return "b", time.Hour, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	value, hit, err := kv.Get(tenantA, "key")
+	if err != nil || !hit || value != "a" {
+		t.Fatalf("tenant B's atomic update affected tenant A: value=%v hit=%v err=%v", value, hit, err)
+	}
+	if err := deleter.Delete(tenantB, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if value, hit, err := kv.Get(tenantA, "key"); err != nil || !hit || value != "a" {
+		t.Fatalf("tenant B's delete affected tenant A: value=%v hit=%v err=%v", value, hit, err)
+	}
+}

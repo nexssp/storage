@@ -130,6 +130,64 @@ func TestRedisOptionsValidation(t *testing.T) {
 	if _, err := NewKV().Open(map[string]string{"addr": "localhost:6379", "unknown": "x"}); err == nil {
 		t.Fatal("expected unknown option error")
 	}
+	if _, err := NewKV().Open(map[string]string{"addr": "localhost:6379", "tenant_scope": "caller"}); err == nil {
+		t.Fatal("expected invalid tenant_scope error")
+	}
+	if _, err := NewLock().Open(map[string]string{"addr": "localhost:6379", "tenant_scope": "tenant"}); err == nil {
+		t.Fatal("expected tenant_scope to be rejected for lock backend")
+	}
+	if _, err := NewBlob().Open(map[string]string{"addr": "localhost:6379", "tenant_scope": "tenant"}); err == nil {
+		t.Fatal("expected tenant_scope to be rejected for blob backend")
+	}
+}
+
+func TestRedisTenantScopedKV(t *testing.T) {
+	server := miniredis.RunT(t)
+	inst, err := NewKV().Open(map[string]string{"addr": server.Addr(), "namespace": "tenant-test", "tenant_scope": "tenant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	kv, err := storage.AssertKV(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantA := xctx.WithTenantID(context.Background(), "tenant-a")
+	tenantB := xctx.WithTenantID(context.Background(), "tenant-b")
+	if _, _, err := kv.Get(context.Background(), "key"); err == nil {
+		t.Fatal("expected missing tenant context to fail")
+	}
+	if err := kv.Set(context.Background(), "key", "value", 0); err == nil {
+		t.Fatal("expected Set without tenant context to fail")
+	}
+	deleter, ok := inst.(interface {
+		Delete(context.Context, string) error
+	})
+	if !ok {
+		t.Fatal("KV instance does not implement Delete")
+	}
+	if err := deleter.Delete(context.Background(), "key"); err == nil {
+		t.Fatal("expected Delete without tenant context to fail")
+	}
+	if err := kv.Set(tenantA, "key", "a", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit, err := kv.Get(tenantB, "key"); err != nil || hit {
+		t.Fatalf("tenant B must not see tenant A's key: hit=%v err=%v", hit, err)
+	}
+	if err := kv.Set(tenantB, "key", "b", 0); err != nil {
+		t.Fatal(err)
+	}
+	value, hit, err := kv.Get(tenantA, "key")
+	if err != nil || !hit || value != "a" {
+		t.Fatalf("tenant A's value changed: value=%v hit=%v err=%v", value, hit, err)
+	}
+	if err := deleter.Delete(tenantB, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if value, hit, err := kv.Get(tenantA, "key"); err != nil || !hit || value != "a" {
+		t.Fatalf("tenant B's delete affected tenant A: value=%v hit=%v err=%v", value, hit, err)
+	}
 }
 
 func TestRedisKeyspacePrefixIsVersioned(t *testing.T) {

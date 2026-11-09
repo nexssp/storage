@@ -70,6 +70,56 @@ func TestKV_ContextCanceled(t *testing.T) {
 	}
 }
 
+func TestKV_TenantScope(t *testing.T) {
+	if _, err := (KV{}).Open(map[string]string{"tenant_scope": "caller"}); err == nil {
+		t.Fatal("expected invalid tenant_scope value to fail")
+	}
+	inst, err := KV{}.Open(map[string]string{"tenant_scope": "tenant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layer, err := storage.AssertKV(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantA := xctx.WithTenantID(context.Background(), "tenant-a")
+	tenantB := xctx.WithTenantID(context.Background(), "tenant-b")
+	if _, _, err := layer.Get(context.Background(), "key"); err == nil {
+		t.Fatal("expected missing tenant context to fail")
+	}
+	if err := layer.Set(context.Background(), "key", "value", 0); err == nil {
+		t.Fatal("expected Set without tenant context to fail")
+	}
+	deleter, ok := inst.(interface {
+		Delete(context.Context, string) error
+	})
+	if !ok {
+		t.Fatal("KV instance does not implement Delete")
+	}
+	if err := deleter.Delete(context.Background(), "key"); err == nil {
+		t.Fatal("expected Delete without tenant context to fail")
+	}
+	if err := layer.Set(tenantA, "key", "a", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit, err := layer.Get(tenantB, "key"); err != nil || hit {
+		t.Fatalf("tenant B must not see tenant A's key: hit=%v err=%v", hit, err)
+	}
+	if err := layer.Set(tenantB, "key", "b", 0); err != nil {
+		t.Fatal(err)
+	}
+	value, hit, err := layer.Get(tenantA, "key")
+	if err != nil || !hit || value != "a" {
+		t.Fatalf("tenant A's value changed: value=%v hit=%v err=%v", value, hit, err)
+	}
+	if err := deleter.Delete(tenantB, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if value, hit, err := layer.Get(tenantA, "key"); err != nil || !hit || value != "a" {
+		t.Fatalf("tenant B's delete affected tenant A: value=%v hit=%v err=%v", value, hit, err)
+	}
+}
+
 // Blob conformance.
 
 func TestBlob_GetPutDelete(t *testing.T) {

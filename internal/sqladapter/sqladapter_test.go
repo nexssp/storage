@@ -133,6 +133,8 @@ func TestSQLBackendRejectsOptionsUnusedByKind(t *testing.T) {
 		options map[string]string
 	}{
 		{name: "blob ttl", kind: storage.KindBlob, options: map[string]string{"path": ":memory:", "ttl": "1m"}},
+		{name: "blob tenant scope", kind: storage.KindBlob, options: map[string]string{"path": ":memory:", "tenant_scope": "tenant"}},
+		{name: "invalid tenant scope", kind: storage.KindKV, options: map[string]string{"path": ":memory:", "tenant_scope": "caller"}},
 		{name: "tx namespace", kind: storage.KindTx, options: map[string]string{"path": ":memory:", "namespace": "other"}},
 		{name: "tx ttl", kind: storage.KindTx, options: map[string]string{"path": ":memory:", "ttl": "1m"}},
 	}

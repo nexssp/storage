@@ -6,6 +6,7 @@
 
 - `sqlite` and `postgres` implement the storage module's KV, blob, and transaction contracts. Their adapter-owned tables are described by embedded Goose migration files.
 - `redis` implements KV, blob, and lock contracts with a versioned keyspace prefix.
+- KV backends can opt into `tenant_scope: "tenant"`, which derives KV keys from the tenant ID supplied in request context. This is key-level isolation only; tenant resolution, per-tenant database selection/provisioning, and application-owned repositories remain the application's responsibility. See [tenant-scoped KV](tenant-scoped-kv.md).
 - SQL `Backend.Open` opens a connection only. It must not create or upgrade tables.
 - The Flow bundle currently has no generic SQL query/exec API, application-model-to-DDL generator, or startup migration hook. An `@storage` declaration does not create application tables.
 

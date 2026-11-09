@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -140,6 +141,48 @@ func TestPostgresStorageIntegration(t *testing.T) {
 	value, hit, err = kv.Get(ctx, "atomic-counter")
 	if err != nil || !hit || value != float64(workers) {
 		t.Fatalf("atomic update result: value=%#v hit=%v err=%v", value, hit, err)
+	}
+
+	scopedInstance, err := NewKV().Open(map[string]string{"dsn": dsn, "namespace": "tenant-scope", "tenant_scope": "tenant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := scopedInstance.Close(); err != nil {
+			t.Errorf("close tenant-scoped KV: %v", err)
+		}
+	})
+	scopedKV, err := storage.AssertKV(scopedInstance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedAtomicKV, err := storage.AssertAtomicKV(scopedInstance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := scopedKV.Get(ctx, "key"); err == nil {
+		t.Fatal("expected missing tenant context to fail")
+	}
+	tenantA := xctx.WithTenantID(ctx, "tenant-a")
+	tenantB := xctx.WithTenantID(ctx, "tenant-b")
+	if err := scopedKV.Set(tenantA, "key", "a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := scopedAtomicKV.Update(tenantB, "key", func(_ any, hit bool) (any, time.Duration, error) {
+		if hit {
+			return nil, 0, errors.New("tenant B unexpectedly saw tenant A's value")
+		}
+		return "b", time.Minute, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	value, hit, err = scopedKV.Get(tenantA, "key")
+	if err != nil || !hit || value != "a" {
+		t.Fatalf("tenant B's atomic update affected tenant A: value=%#v hit=%v err=%v", value, hit, err)
+	}
+	value, hit, err = scopedKV.Get(tenantB, "key")
+	if err != nil || !hit || value != "b" {
+		t.Fatalf("tenant B's atomic update did not persist independently: value=%#v hit=%v err=%v", value, hit, err)
 	}
 
 	txInstance, err := NewTx().Open(map[string]string{"dsn": dsn})
