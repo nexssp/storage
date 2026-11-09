@@ -17,9 +17,8 @@ import (
 // action name at capability-lookup time, producing a clean
 // compile-time error if the store was not declared.
 //
-// All aliased actions record events into the request context (when
-// the storage.events hook is attached) exactly like the generic
-// storage.* actions.
+// KV get aliases report cache hit/miss/error events when the hook is
+// attached. Other aliases return storage errors through their action result.
 
 // ---------------------------------------------------------------------------
 // KV aliased actions — <alias>.kv.{get,set,del}
@@ -182,7 +181,6 @@ func aliasedBlobPut(s *store, storeName string) action.AnyAction {
 		Build()
 }
 
-// different Kind (Blob) and calls a different method (Delete).
 func aliasedBlobDel(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".blob.del",
 		func(ctx context.Context, req struct {
@@ -241,7 +239,6 @@ func aliasedLockAcquire(s *store, storeName string) action.AnyAction {
 		Build()
 }
 
-// different Kind (Mutex) and calls a different method (Unlock).
 func aliasedLockRelease(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".release",
 		func(ctx context.Context, req struct {
@@ -276,41 +273,41 @@ func aliasedFencedAcquire(s *store, storeName string) action.AnyAction {
 			Key string `json:"key"`
 			TTL string `json:"ttl"`
 		}) (struct {
-			Lease    any  `json:"lease"`
-			Acquired bool `json:"acquired"`
+			Lease    action.LockLease `json:"lease"`
+			Acquired bool             `json:"acquired"`
 		}, error,
 		) {
 			inst, err := s.instance(storeName)
 			if err != nil {
 				return struct {
-					Lease    any  `json:"lease"`
-					Acquired bool `json:"acquired"`
+					Lease    action.LockLease `json:"lease"`
+					Acquired bool             `json:"acquired"`
 				}{}, err
 			}
 			m, err := storage.AssertFencedMutex(inst)
 			if err != nil {
 				return struct {
-					Lease    any  `json:"lease"`
-					Acquired bool `json:"acquired"`
+					Lease    action.LockLease `json:"lease"`
+					Acquired bool             `json:"acquired"`
 				}{}, err
 			}
 			ttl, err := storage.ParseDuration(req.TTL, 30*time.Second)
 			if err != nil {
 				return struct {
-					Lease    any  `json:"lease"`
-					Acquired bool `json:"acquired"`
+					Lease    action.LockLease `json:"lease"`
+					Acquired bool             `json:"acquired"`
 				}{}, err
 			}
 			lease, ok, err := m.Acquire(ctx, req.Key, ttl)
 			if err != nil {
 				return struct {
-					Lease    any  `json:"lease"`
-					Acquired bool `json:"acquired"`
+					Lease    action.LockLease `json:"lease"`
+					Acquired bool             `json:"acquired"`
 				}{}, storage.Unavailable("fenced acquire failed", err)
 			}
 			return struct {
-				Lease    any  `json:"lease"`
-				Acquired bool `json:"acquired"`
+				Lease    action.LockLease `json:"lease"`
+				Acquired bool             `json:"acquired"`
 			}{Lease: lease, Acquired: ok}, nil
 		}).
 		Description("Acquire a fenced lock from "+storeName).
@@ -321,8 +318,8 @@ func aliasedFencedAcquire(s *store, storeName string) action.AnyAction {
 func aliasedFencedRelease(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".fenced.release",
 		func(ctx context.Context, req struct {
-			Key   string `json:"key"`
-			Lease any    `json:"lease"`
+			Key   string           `json:"key,omitempty"`
+			Lease action.LockLease `json:"lease"`
 		},
 		) (lockReleaseRes, error) {
 			inst, err := s.instance(storeName)
@@ -333,13 +330,17 @@ func aliasedFencedRelease(s *store, storeName string) action.AnyAction {
 			if err != nil {
 				return lockReleaseRes{}, err
 			}
-			// The lease is passed as a map; reconstruct it.
-			lease := leaseFromAny(req.Lease)
-			_, err = m.Release(ctx, lease)
+			if req.Key != "" && req.Key != req.Lease.Key {
+				return lockReleaseRes{}, storage.BadRequest("fenced release key does not match lease")
+			}
+			released, err := m.Release(ctx, req.Lease)
 			if err != nil {
 				return lockReleaseRes{}, storage.Unavailable("fenced release failed", err)
 			}
-			return lockReleaseRes{OK: true}, nil
+			if !released {
+				return lockReleaseRes{}, storage.Conflict("fenced lock lease is stale or already released")
+			}
+			return lockReleaseRes{OK: released}, nil
 		}).
 		Description("Release a fenced lock from "+storeName).
 		Tag("storage", "fenced", "release").
@@ -350,49 +351,41 @@ func aliasedFencedRelease(s *store, storeName string) action.AnyAction {
 // Idempotency aliased actions — <alias>.idem.{claim,complete,release}
 // ---------------------------------------------------------------------------
 
+type idemClaimResult struct {
+	State string                   `json:"state"`
+	Token string                   `json:"token"`
+	Entry *action.IdempotencyEntry `json:"entry,omitempty"`
+}
+
 func aliasedIdemClaim(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".idem.claim",
 		func(ctx context.Context, req struct {
 			Key         string `json:"key"`
 			RequestHash string `json:"request_hash"`
 			LeaseTTL    string `json:"lease_ttl"`
-		}) (struct {
-			State string `json:"state"`
-			Token string `json:"token"`
-		}, error,
-		) {
+		},
+		) (idemClaimResult, error) {
 			inst, err := s.instance(storeName)
 			if err != nil {
-				return struct {
-					State string `json:"state"`
-					Token string `json:"token"`
-				}{}, err
+				return idemClaimResult{}, err
 			}
 			coord, ok := inst.(action.IdempotencyCoordinator)
 			if !ok {
-				return struct {
-					State string `json:"state"`
-					Token string `json:"token"`
-				}{}, storage.BadRequestf("backend does not support IdempotencyCoordinator")
+				return idemClaimResult{}, storage.BadRequestf("backend does not support IdempotencyCoordinator")
 			}
 			leaseTTL, err := storage.ParseDuration(req.LeaseTTL, 2*time.Minute)
 			if err != nil {
-				return struct {
-					State string `json:"state"`
-					Token string `json:"token"`
-				}{}, err
+				return idemClaimResult{}, err
 			}
 			claim, err := coord.Claim(ctx, req.Key, req.RequestHash, leaseTTL)
 			if err != nil {
-				return struct {
-					State string `json:"state"`
-					Token string `json:"token"`
-				}{}, storage.Unavailable("idem claim failed", err)
+				return idemClaimResult{}, storage.Unavailable("idem claim failed", err)
 			}
-			return struct {
-				State string `json:"state"`
-				Token string `json:"token"`
-			}{State: claimStateString(claim.State), Token: claim.Token}, nil
+			result := idemClaimResult{State: claimStateString(claim.State), Token: claim.Token}
+			if claim.State == action.IdempotencyClaimCompleted {
+				result.Entry = &claim.Entry
+			}
+			return result, nil
 		}).
 		Description("Claim an idempotency key on "+storeName).
 		Tag("storage", "idem", "claim").
@@ -402,9 +395,11 @@ func aliasedIdemClaim(s *store, storeName string) action.AnyAction {
 func aliasedIdemComplete(s *store, storeName string) action.AnyAction {
 	return action.New(storeName+".idem.complete",
 		func(ctx context.Context, req struct {
-			Key   string `json:"key"`
-			Token string `json:"token"`
-			Body  any    `json:"body"`
+			Key         string `json:"key"`
+			Token       string `json:"token"`
+			RequestHash string `json:"request_hash"`
+			Body        any    `json:"body"`
+			TTL         string `json:"ttl,omitempty"`
 		}) (struct {
 			OK bool `json:"ok"`
 		}, error,
@@ -421,6 +416,11 @@ func aliasedIdemComplete(s *store, storeName string) action.AnyAction {
 					OK bool `json:"ok"`
 				}{}, storage.BadRequestf("backend does not support IdempotencyCoordinator")
 			}
+			if req.RequestHash == "" {
+				return struct {
+					OK bool `json:"ok"`
+				}{}, storage.BadRequest("idem complete: request_hash is required")
+			}
 			bodyBytes, err := json.Marshal(req.Body)
 			if err != nil {
 				return struct {
@@ -430,9 +430,25 @@ func aliasedIdemComplete(s *store, storeName string) action.AnyAction {
 			entry := action.IdempotencyEntry{
 				Body:        bodyBytes,
 				StoredAt:    time.Now(),
-				RequestHash: req.Token,
+				RequestHash: req.RequestHash,
 			}
-			if err := coord.Complete(ctx, req.Key, req.Token, entry, time.Hour); err != nil {
+			ttlRaw := req.TTL
+			if ttlRaw == "" {
+				decl, declErr := s.declaration(storeName)
+				if declErr != nil {
+					return struct {
+						OK bool `json:"ok"`
+					}{}, declErr
+				}
+				ttlRaw = decl.Options["ttl"]
+			}
+			ttl, err := storage.ParseDuration(ttlRaw, action.DefaultIdempotencyTTL)
+			if err != nil {
+				return struct {
+					OK bool `json:"ok"`
+				}{}, err
+			}
+			if err := coord.Complete(ctx, req.Key, req.Token, entry, ttl); err != nil {
 				return struct {
 					OK bool `json:"ok"`
 				}{}, storage.Unavailable("idem complete failed", err)
@@ -651,22 +667,4 @@ func claimStateString(s action.IdempotencyClaimState) string {
 	default:
 		return "unknown"
 	}
-}
-
-func leaseFromAny(v any) action.LockLease {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return action.LockLease{}
-	}
-	lease := action.LockLease{}
-	if s, ok := m["Key"].(string); ok {
-		lease.Key = s
-	}
-	if s, ok := m["Owner"].(string); ok {
-		lease.Owner = s
-	}
-	if f, ok := m["Fence"].(float64); ok {
-		lease.Fence = int64(f)
-	}
-	return lease
 }

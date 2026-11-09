@@ -35,7 +35,14 @@ func TestBundleShape(t *testing.T) {
 	if b.WrapPipeline == nil {
 		t.Fatal("WrapPipeline hook is nil")
 	}
-	// Modifiers moved into storageAdvisor; the bundle declares zero.
+	fixture, err := b.Fixtures.Open("nflows/basic.nflow")
+	if err != nil {
+		t.Fatalf("embedded Flow fixture missing: %v", err)
+	}
+	if err := fixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Storage-backed modifiers are consumed by storageAdvisor; dedup is local.
 	if len(b.Modifiers) != 4 {
 		t.Fatalf("Modifiers: got %d, want 4 (handled by advisor)", len(b.Modifiers))
 	}

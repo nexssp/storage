@@ -49,7 +49,7 @@ Redis does not use Goose or SQL migration files. Keep keys namespaced and versio
 
 ## Sandbox engine and migration presets
 
-This section records the contract for a Flow sandbox that invokes explicit setup/deployment work; **the runtime integration is not implemented in this repository or in its pinned Flow dependency (`github.com/nexssp/flow v0.26.1`)**. The inspected dependency has no `sandbox.exec` action or container dispatch integration. Its `external.exec` action runs a host process and is not an isolated sandbox; do not use or describe it as one. Do not treat the design below as existing Flow CLI commands.
+This section records the contract for a Flow sandbox that invokes explicit setup/deployment work; **the runtime integration is not implemented in this repository or in its pinned Flow dependency (`github.com/nexssp/flow v0.70.3`)**. The inspected dependency has no `sandbox.exec` action or container dispatch integration. Its `external.exec` action runs a host process and is not an isolated sandbox; do not use or describe it as one. Do not treat the design below as existing Flow CLI commands.
 
 The storage bundle can open a PostgreSQL backend when the host provides a reachable DSN, but the current `@storage` declaration receives literal options at compile/preprocess time. It does not expand `${DATABASE_URL}` or receive credentials from a secret manager. A production Flow sandbox integration therefore also needs Flow-side runtime support and a trusted secret-injection/configuration path; this storage-only change does not add that integration. The exact local PostgreSQL example is in [`examples/postgres/`](../examples/postgres/).
 
@@ -99,7 +99,7 @@ A PostgreSQL upgrade is still an explicit deployment action requiring a migratio
 ## Non-goals
 
 - Do not change the Flow engine or add SQL actions as part of this storage conventions work.
-- Do not run migrations during application startup or against a real database as part of tests.
+- Do not run migrations during application startup or against a shared/production database as part of tests; database integration tests must use a disposable isolated service/schema.
 - Do not add automatic schema generation or a generic SQL API in this scope.
 - Do not claim a sandbox runtime check exists until the Flow-side engine/image/profile implementation provides it.
 - Do not adopt the separate proposal's `CREATE TABLE IF NOT EXISTS` inside SQLite `Open`; that would make schema changes implicit. Stream-oriented BlobStore methods, metadata/URL support, and dynamic `@require` driver selection are useful future API questions, but require a separate compatibility and Flow-integration design.

@@ -46,9 +46,9 @@ func ScopedKey(scope xfile.Scope, key string) string {
 	return fmt.Sprintf("%d:%s%d:%s%d:%s", len(scope.TenantID), scope.TenantID, len(scope.CallerID), scope.CallerID, len(key), key)
 }
 
-// Key validates a reference for provider and decodes its opaque key. It does
-// not authorize access; callers must separately compare stored owner metadata
-// with the context-derived scope.
+// Key validates a reference for provider and decodes its opaque key. This
+// format does not support xfile.Ref.Version. Key does not authorize access;
+// callers must separately compare stored owner metadata with the context scope.
 func Key(provider string, ref xfile.Ref) (string, error) {
 	if ref.Provider == "" || string(ref.Provider) != provider {
 		return "", storage.BadRequestf("blob: reference provider %q does not match %q", ref.Provider, provider)

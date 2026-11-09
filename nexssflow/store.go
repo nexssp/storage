@@ -2,6 +2,7 @@ package nexssflow
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/nexssp/kernel/xctx"
@@ -56,10 +57,16 @@ func (b *bundle) Close(ctx context.Context) error {
 	stores := b.stores
 	b.stores = nil
 	b.mu.Unlock()
-	for _, s := range stores {
-		_ = s.Close(ctx)
+	var errs []error
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, err)
 	}
-	return nil
+	for _, s := range stores {
+		if err := s.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type store struct {
@@ -99,12 +106,17 @@ func (s *store) instance(name string) (storage.Instance, error) {
 
 func (s *store) Close(_ context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, inst := range s.insts {
-		_ = inst.Close()
-	}
+	instances := s.insts
 	s.insts = make(map[string]storage.Instance)
-	return nil
+	s.mu.Unlock()
+
+	var errs []error
+	for _, inst := range instances {
+		if err := inst.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // storeFromContext returns the store installed by the WrapPipeline hook.

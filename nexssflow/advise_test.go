@@ -103,6 +103,46 @@ func TestAdvisor_CacheStore_WiresCacheMiddleware(t *testing.T) {
 	}
 }
 
+func TestAdvisor_CacheStoreNamespacesKeysByAction(t *testing.T) {
+	s := newAdviseStore(t, storage.Declaration{Name: "cache", Backend: "memory", Kind: storage.KindKV})
+	build := func(name string, handler func(context.Context, any) (any, error)) action.AnyAction {
+		builder := action.New(name, handler)
+		atom := &compiler.Atom{Name: name, Modifiers: []string{"cache_store=cache"}}
+		if err := storageAdvisor(s)(atom, builder); err != nil {
+			t.Fatalf("advisor for %s: %v", name, err)
+		}
+		return builder.Build()
+	}
+	var firstCalls, secondCalls int
+	first := build("action.first", func(context.Context, any) (any, error) { firstCalls++; return "first", nil })
+	second := build("action.second", func(context.Context, any) (any, error) { secondCalls++; return "second", nil })
+	ctx := context.Background()
+	request := map[string]any{"id": "same"}
+	for _, act := range []action.AnyAction{first, second, first, second} {
+		if _, err := act.DoAny(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("handler calls = (%d, %d), want (1, 1)", firstCalls, secondCalls)
+	}
+}
+
+func TestAdvisor_CacheStoreBypassesUnencodableRequests(t *testing.T) {
+	s := newAdviseStore(t, storage.Declaration{Name: "cache", Backend: "memory", Kind: storage.KindKV})
+	var calls int
+	act := runAdvisor(t, s, func(context.Context, any) (any, error) { calls++; return calls, nil }, "cache_store=cache")
+	request := map[string]any{"channel": make(chan int)}
+	for range 2 {
+		if _, err := act.DoAny(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 when unencodable request bypasses cache", calls)
+	}
+}
+
 func TestAdvisor_CacheStore_ConsumesModifier(t *testing.T) {
 	s := newAdviseStore(t, storage.Declaration{
 		Name:    "cache",
@@ -165,7 +205,7 @@ func TestAdvisor_CacheStore_RejectsWrongKind(t *testing.T) {
 
 // TestAdvisor_IdempotentStore_WiresIdempotency proves that the
 // :idempotent_store= modifier wires Kernel's IdempotencyMiddleware to
-// a declared idem store. Two calls with the same RequestID replay the
+// a declared idem store. Two calls with the same explicit key replay the
 // first result; the handler runs once.
 func TestAdvisor_IdempotentStore_WiresIdempotency(t *testing.T) {
 	s := newAdviseStore(t, storage.Declaration{
@@ -183,7 +223,7 @@ func TestAdvisor_IdempotentStore_WiresIdempotency(t *testing.T) {
 		"idempotent_store=idem",
 	)
 
-	ctx := xctx.WithRequestID(context.Background(), "test-key-1")
+	ctx := xctx.WithIdempotencyKey(context.Background(), "test-key-1")
 
 	if _, err := act.DoAny(ctx, nil); err != nil {
 		t.Fatalf("first call: %v", err)
@@ -221,29 +261,29 @@ func TestAdvisor_IdempotentStore_RejectsWrongKind(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// :dedup_store=
+// :local_dedup
 // ---------------------------------------------------------------------------
-
-// TestAdvisor_DedupStore_WiresDedup proves that the :dedup_store=
-// modifier wires Kernel's in-flight deduplication: two concurrent
-// invocations with the same key share a single handler execution.
-func TestAdvisor_DedupStore_WiresDedup(t *testing.T) {
-	s := newAdviseStore(t, storage.Declaration{
-		Name:    "locks",
-		Backend: "memory",
-		Kind:    storage.KindLock,
-	})
-
+func TestLocalDedupModifier_WiresProcessLocalDedupWithoutStorage(t *testing.T) {
+	var dedup compiler.Modifier
+	for _, modifier := range storageModifiers() {
+		if modifier.Name == "local_dedup" {
+			dedup = modifier
+			break
+		}
+	}
+	if dedup.Apply == nil {
+		t.Fatal("dedup modifier was not registered")
+	}
 	var calls int
-	act := runAdvisor(t, s,
-		func(_ context.Context, _ any) (any, error) {
-			calls++
-			time.Sleep(20 * time.Millisecond)
-			return "result", nil
-		},
-		"dedup_store=locks",
-	)
-
+	builder := action.New("test.action", func(_ context.Context, _ any) (any, error) {
+		calls++
+		time.Sleep(20 * time.Millisecond)
+		return "result", nil
+	})
+	if err := dedup.Apply(builder, ""); err != nil {
+		t.Fatalf("apply dedup modifier: %v", err)
+	}
+	act := builder.Build()
 	ctx := context.Background()
 	req := map[string]any{"id": "same-key"}
 	done := make(chan struct{}, 2)
@@ -251,29 +291,29 @@ func TestAdvisor_DedupStore_WiresDedup(t *testing.T) {
 	go func() { _, _ = act.DoAny(ctx, req); done <- struct{}{} }()
 	<-done
 	<-done
-
 	if calls != 1 {
 		t.Fatalf("after concurrent calls: handler calls = %d, want 1 (deduped)", calls)
 	}
 }
 
-func TestAdvisor_DedupStore_RejectsUnknownStore(t *testing.T) {
-	s := newAdviseStore(t)
-	err := runAdvisorErr(t, s, "dedup_store=nosuchstore")
-	if err == nil {
-		t.Fatal("expected error for unknown store")
-	}
-}
-
-func TestAdvisor_DedupStore_RejectsWrongKind(t *testing.T) {
-	s := newAdviseStore(t, storage.Declaration{
-		Name:    "cache",
-		Backend: "memory",
-		Kind:    storage.KindKV,
-	})
-	err := runAdvisorErr(t, s, "dedup_store=cache")
-	if err == nil {
-		t.Fatal("expected error for wrong-kind store")
+func TestStorageBackedModifiersFailWithoutStorageDeclaration(t *testing.T) {
+	for _, name := range []string{"cache_store", "cache_ttl", "idempotent_store"} {
+		t.Run(name, func(t *testing.T) {
+			var found compiler.Modifier
+			for _, modifier := range storageModifiers() {
+				if modifier.Name == name {
+					found = modifier
+					break
+				}
+			}
+			if found.Apply == nil {
+				t.Fatalf("modifier %q was not registered", name)
+			}
+			builder := action.New("test.action", func(_ context.Context, _ any) (any, error) { return nil, nil })
+			if err := found.Apply(builder, "store"); err == nil {
+				t.Fatalf("modifier %q must fail when no @storage advisor is installed", name)
+			}
+		})
 	}
 }
 

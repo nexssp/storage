@@ -7,7 +7,7 @@ It is loaded via `@require` — no Flow checkout changes are needed.
 ## Install
 
 ```nflow
-@require github.com/nexssp/storage v0.1.0
+@require github.com/nexssp/storage v0.6.0
 ```
 
 `@require` resolves to `github.com/nexssp/storage/nexssflow` (the
@@ -50,19 +50,23 @@ existing result shape for current callers.
 # Wire Kernel's CacheMiddleware to use the declared store.
 # First call misses → handler runs → back-fills.
 # Second call hits → handler does not run.
-http.request:cached="cache:30s" @{ url: "https://api.example/users/1" }
+http.request:cache_store=cache:cache_ttl=30s @{ url: "https://api.example/users/1" }
 ```
 
-Three modifiers, all wired by the `AtomAdvise` hook:
+Storage modifiers require a matching `@storage` declaration and are wired by the `AtomAdvise` hook. `:local_dedup` is process-local concurrent request coalescing and does not require a store:
 
 | Modifier | Wires | Value |
 |---|---|---|
-| `:cached="store:ttl"` | `CacheMiddleware` | `<store-name>:<duration>` |
+| `:cache_store="store"` | `CacheMiddleware` | KV store alias |
+| `:cache_ttl="duration"` | Cache TTL | Duration; requires `:cache_store` |
 | `:idempotent_store="store"` | `IdempotencyMiddleware` | `<store-name>` |
-| `:dedup_store="store"` | `Dedup` | `<store-name>` |
+| `:local_dedup` | `Dedup` | No value; same-process in-flight calls only |
 
-The store name may contain colons (e.g. `kv:redis`); the TTL is
-parsed from the segment after the last colon.
+If `:cache_ttl` is omitted, the declared KV store's `ttl` option is used, or five minutes when not set. A cache key is namespaced by action name and derived from the JSON representation of the request. Requests that cannot be JSON-encoded bypass caching/dedup rather than sharing a fallback key.
+
+The aliased `idem.claim` action returns the stored `entry` when the claim state is `completed`, so a Flow can replay its status, body, and headers. `idem.complete` requires the original `request_hash`; its TTL can be set on the request, inherited from the store's `ttl` option, or defaults to Kernel's idempotency TTL.
+
+`:idempotent_store` replays only when the host puts an explicit key in the execution context with Kernel's `xctx.WithIdempotencyKey`. `RequestID` is for correlation and does not enable replay by itself; plain Flow CLI fixtures therefore demonstrate wiring, not keyed replay.
 
 ### Transactional pipeline execution
 
@@ -114,9 +118,9 @@ nflow run nflows/kv_miss.nflow        # Missing key returns hit=false
 nflow run nflows/blob.nflow           # Blob put + get roundtrip
 nflow run nflows/lock.nflow           # Lock acquire + release
 nflow run nflows/alias.nflow          # `as` alias
-nflow run nflows/read_through.nflow   # :cached= read-through pattern
+nflow run nflows/read_through.nflow   # :cache_store= read-through pattern
 nflow run nflows/idempotent.nflow     # :idempotent_store= pattern
-nflow run nflows/dedup.nflow          # :dedup_store= pattern
+nflow run nflows/dedup.nflow          # local :local_dedup pattern
 ```
 
 ## Tests
@@ -128,7 +132,7 @@ task ci
 ```
 
 The advisor tests (`advise_test.go`) prove the middleware wiring
-works end-to-end: a `:cached=` modifier causes the second call to be
+works end-to-end: a `:cache_store=` modifier causes the second call to be
 served from cache with zero handler invocations. Transaction integration
 tests run a Flow pipeline against SQLite and verify both commit and rollback.
 

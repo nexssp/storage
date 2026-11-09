@@ -1,9 +1,11 @@
 package blobref
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/nexssp/kernel/xctx"
 	"github.com/nexssp/kernel/xfile"
 )
 
@@ -57,5 +59,26 @@ func TestScopedKeyIncludesBothCallerAndTenant(t *testing.T) {
 	}
 	if ScopedKey(base, "same") == ScopedKey(xfile.Scope{CallerID: "user", TenantID: "tenant"}, "same-other") {
 		t.Fatal("different logical keys share an internal key")
+	}
+}
+
+func TestMetadataFromBytesAndDescribe(t *testing.T) {
+	ctx := xctx.WithTenantID(xctx.WithUserID(context.Background(), "user-1"), "tenant-1")
+	data := []byte("payload")
+	meta, err := MetadataFromBytes(ctx, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, digest := Digest(data)
+	if meta.Size != size || meta.Digest != digest || meta.CallerID != "user-1" || meta.TenantID != "tenant-1" {
+		t.Fatalf("metadata = %+v, want confirmed bytes and authenticated scope", meta)
+	}
+	ref := NewRef("memory", "private/payload", meta)
+	description := Describe(ref)
+	if !strings.Contains(description, `provider="memory"`) || !strings.Contains(description, `id="`+string(ref.ID)+`"`) || strings.Contains(description, "private/payload") {
+		t.Fatalf("description should identify the opaque reference without exposing logical key: %q", description)
+	}
+	if _, err := MetadataFromBytes(context.Background(), data); err == nil {
+		t.Fatal("MetadataFromBytes must require authenticated caller and tenant scope")
 	}
 }

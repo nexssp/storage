@@ -24,7 +24,7 @@
 //	// inst implements action.CacheLayer[any]
 //
 // A Flow extension wires this Registry into a Bundle; see
-// ../flow-storage-extension/library.go.
+// nexssflow/library.go.
 package storage
 
 import (
@@ -93,8 +93,8 @@ const (
 	KindRateLimit Kind = "rate_limit"
 )
 
-// AllKinds returns every defined Kind, sorted. Useful for diagnostics
-// and CLI help output.
+// AllKinds returns every defined Kind in a stable order, useful for
+// diagnostics and CLI help output.
 func AllKinds() []Kind {
 	return []Kind{
 		KindKV,
@@ -151,9 +151,9 @@ type Instance interface {
 	// the Backend that produced it.
 	Kind() Kind
 
-	// Close releases the Instance's resources. It is called exactly
-	// once by the Registry when the host is shutting down. After
-	// Close returns, the Instance must not be used.
+	// Close releases the Instance's resources. An owning store and the
+	// Registry may both attempt shutdown, so implementations should make
+	// Close idempotent. After Close returns, the Instance must not be used.
 	Close() error
 }
 
@@ -386,9 +386,9 @@ func (r *Registry) openLocked(backendName string, kind Kind, opts map[string]str
 // Close releases every opened Instance. Errors are joined but never
 // abort the loop; one failing Close does not leak the rest.
 //
-// Close honors ctx for backends whose Close blocks on network I/O.
-// Callers should pass a context with a deadline so a hung backend
-// cannot stall host shutdown indefinitely.
+// Close attempts every tracked Instance even if ctx is canceled. Since
+// Instance.Close has no context parameter, backends must bound their own
+// shutdown work; ctx cancellation is returned alongside close errors.
 func (r *Registry) Close(ctx context.Context) error {
 	r.mu.Lock()
 	opened := r.opened
@@ -396,11 +396,10 @@ func (r *Registry) Close(ctx context.Context) error {
 	r.mu.Unlock()
 
 	var errs []error
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, err)
+	}
 	for _, inst := range opened {
-		if ctx.Err() != nil {
-			errs = append(errs, ctx.Err())
-			break
-		}
 		if err := inst.Close(); err != nil {
 			errs = append(errs, err)
 		}
@@ -418,7 +417,7 @@ func AssertKV(inst Instance) (action.CacheLayer[any], error) {
 	}
 	layer, ok := inst.(action.CacheLayer[any])
 	if !ok {
-		return nil, Internalf("storage: backend %q did not implement action.CacheLayer[any]", inst.Kind())
+		return nil, Internalf("storage: instance of kind %q does not implement action.CacheLayer[any]", inst.Kind())
 	}
 	return layer, nil
 }
@@ -437,7 +436,7 @@ func AssertAtomicKV(inst Instance) (AtomicKV, error) {
 	}
 	store, ok := inst.(AtomicKV)
 	if !ok {
-		return nil, Internalf("storage: backend %q does not support AtomicKV", inst.Kind())
+		return nil, Internalf("storage: instance of kind %q does not support AtomicKV", inst.Kind())
 	}
 	return store, nil
 }

@@ -287,10 +287,20 @@ func TestIdem_SetGet(t *testing.T) {
 	s, _ := storage.AssertIdempotencyStore(inst)
 	ctx := context.Background()
 
-	s.Set(ctx, "k", action.IdempotencyEntry{Body: []byte(`{"ok":1}`), RequestHash: "h1"}, time.Minute)
+	body := []byte(`{"ok":1}`)
+	headers := map[string]string{"content-type": "application/json"}
+	s.Set(ctx, "k", action.IdempotencyEntry{Body: body, Headers: headers, RequestHash: "h1"}, time.Minute)
+	body[0] = 'X'
+	headers["content-type"] = "text/plain"
 	entry, ok := s.Get(ctx, "k")
-	if !ok || string(entry.Body) != `{"ok":1}` {
+	if !ok || string(entry.Body) != `{"ok":1}` || entry.Headers["content-type"] != "application/json" {
 		t.Fatalf("get: entry=%+v ok=%v", entry, ok)
+	}
+	entry.Body[0] = 'X'
+	entry.Headers["content-type"] = "text/plain"
+	entry, ok = s.Get(ctx, "k")
+	if !ok || string(entry.Body) != `{"ok":1}` || entry.Headers["content-type"] != "application/json" {
+		t.Fatalf("stored entry was aliased: entry=%+v ok=%v", entry, ok)
 	}
 }
 
@@ -397,5 +407,45 @@ func TestRateLimit_Allow(t *testing.T) {
 	// Third call within the same instant must fail (burst exhausted).
 	if ok, _ := rl.Allow(ctx, "k"); ok {
 		t.Fatal("third allow should fail (bucket empty)")
+	}
+}
+
+func TestRateLimit_UsesPerKeyBuckets(t *testing.T) {
+	inst, err := RateLimit{}.Open(map[string]string{"rps": "1", "burst": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter, _ := storage.AssertRateLimiter(inst)
+	ctx := context.Background()
+	if allowed, err := limiter.Allow(ctx, "first"); err != nil || !allowed {
+		t.Fatalf("first key initial request: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := limiter.Allow(ctx, "first"); err != nil || allowed {
+		t.Fatalf("first key exceeded burst: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := limiter.Allow(ctx, "second"); err != nil || !allowed {
+		t.Fatalf("second key should have an independent burst: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestMemoryBackendsRejectUnknownOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(map[string]string) (storage.Instance, error)
+	}{
+		{name: "kv", open: KV{}.Open},
+		{name: "blob", open: Blob{}.Open},
+		{name: "lock", open: Lock{}.Open},
+		{name: "fenced lock", open: FencedLock{}.Open},
+		{name: "idempotency", open: Idem{}.Open},
+		{name: "journal", open: Journal{}.Open},
+		{name: "transaction", open: Tx{}.Open},
+		{name: "rate limit", open: RateLimit{}.Open},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.open(map[string]string{"unknown": "value"}); err == nil {
+				t.Fatal("expected unknown option error")
+			}
+		})
 	}
 }

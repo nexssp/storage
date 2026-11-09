@@ -142,6 +142,8 @@ func TestRedisKeyspacePrefixIsVersioned(t *testing.T) {
 		{name: "default namespace", want: "nexss:storage:v1:"},
 		{name: "custom namespace gets version", namespace: "tenant-a", want: "tenant-a:v1:"},
 		{name: "existing version is not duplicated", namespace: "tenant-a:v1", want: "tenant-a:v1:"},
+		{name: "leading separator before version is normalized", namespace: ":v1", want: "v1:"},
+		{name: "newer version is preserved", namespace: "tenant-a:v2", want: "tenant-a:v2:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := map[string]string{"addr": server.Addr()}
@@ -162,5 +164,74 @@ func TestRedisKeyspacePrefixIsVersioned(t *testing.T) {
 				t.Fatalf("key %q does not start with versioned prefix %q", key, tc.want)
 			}
 		})
+	}
+}
+
+func TestRedisUnlockRequiresLocalOwner(t *testing.T) {
+	server := miniredis.RunT(t)
+	ctx := context.Background()
+	opts := map[string]string{"addr": server.Addr(), "namespace": "unlock-test"}
+
+	ownerInstance, err := NewLock().Open(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerInstance.Close()
+	otherInstance, err := NewLock().Open(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherInstance.Close()
+	owner, _ := storage.AssertMutex(ownerInstance)
+	other, _ := storage.AssertMutex(otherInstance)
+
+	if ok, err := owner.TryLock(ctx, "resource", time.Minute); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	if err := other.Unlock(ctx, "resource"); err == nil {
+		t.Fatal("unlock without a local owner must fail")
+	}
+	if ok, err := other.TryLock(ctx, "resource", time.Minute); err != nil || ok {
+		t.Fatalf("foreign unlock released the lock: ok=%v err=%v", ok, err)
+	}
+	if err := owner.Unlock(ctx, "resource"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisLockOwnerTablePrunesExpiredEntriesAndIsBounded(t *testing.T) {
+	server := miniredis.RunT(t)
+	inst, err := NewLock().Open(map[string]string{"addr": server.Addr()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	concrete, ok := inst.(*instance)
+	if !ok {
+		t.Fatalf("opened instance has type %T, want *instance", inst)
+	}
+
+	concrete.mu.Lock()
+	for index := range maxLockOwners {
+		concrete.owners[strings.Repeat("x", index+1)] = lockOwner{token: "expired", expiresAt: time.Now().Add(-time.Second)}
+	}
+	concrete.mu.Unlock()
+	if ok, err := concrete.TryLock(context.Background(), "fresh", time.Minute); err != nil || !ok {
+		t.Fatalf("acquire after pruning: ok=%v err=%v", ok, err)
+	}
+	concrete.mu.Lock()
+	got := len(concrete.owners)
+	concrete.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("owner table size = %d, want 1 after stale-entry pruning", got)
+	}
+
+	concrete.mu.Lock()
+	for index := range maxLockOwners {
+		concrete.owners[strings.Repeat("y", index+1)] = lockOwner{token: "active", expiresAt: time.Now().Add(time.Minute)}
+	}
+	concrete.mu.Unlock()
+	if _, err := concrete.TryLock(context.Background(), "over-capacity", time.Minute); err == nil {
+		t.Fatal("expected owner table capacity error")
 	}
 }

@@ -30,9 +30,8 @@ func currentStore(ctx context.Context) (*store, error) {
 // contains the generic storage.* actions. Each action takes a `store`
 // argument naming the @storage declaration to use.
 //
-// Every action records events into the request context (when the
-// storage.events hook is attached via @hook:storage.events) so
-// observability and test assertions work without additional wiring.
+// Actions that expose cache observations record events into the request
+// context when @hook:storage.events is attached.
 func buildLibrary() action.Library {
 	return action.Library{
 		Name: "storage",
@@ -57,10 +56,9 @@ func buildLibrary() action.Library {
 // ---------------------------------------------------------------------------
 // KV actions — operate on action.CacheLayer[any]
 //
-// Each action records "cache_hit" / "cache_miss" / "error" events into
-// the request context when the storage.events hook is attached. The
-// event recording is a no-op when the hook is absent, so the hot path
-// stays clean.
+// KV get records cache_hit/cache_miss/error events; KV mutations record
+// error events on storage failures. Event recording is a no-op when the
+// storage.events hook is absent.
 // ---------------------------------------------------------------------------
 
 type kvGetReq struct {
@@ -180,7 +178,7 @@ func kvDelAction() action.AnyAction {
 			d, ok := layer.(deleter)
 			if !ok {
 				return kvDelRes{}, storage.BadRequestf(
-					"storage.kv.del: backend %q does not support Delete", inst.Kind())
+					"storage.kv.del: instance of kind %q does not support Delete", inst.Kind())
 			}
 			if err := d.Delete(ctx, req.Key); err != nil {
 				recordStorageEvent(ctx, "error", req.Store, "storage.kv.del", req.Key)
@@ -283,7 +281,6 @@ type blobDelRes struct {
 	OK bool `json:"ok"`
 }
 
-// different Kind (Blob) and calls a different method (Delete).
 func blobDelAction() action.AnyAction {
 	return action.New("storage.blob.del",
 		func(ctx context.Context, req blobDelReq) (blobDelRes, error) {
@@ -362,7 +359,6 @@ type lockReleaseRes struct {
 	OK bool `json:"ok"`
 }
 
-// different Kind (Mutex) and calls a different method (Unlock).
 func lockReleaseAction() action.AnyAction {
 	return action.New("storage.lock.release",
 		func(ctx context.Context, req lockReleaseReq) (lockReleaseRes, error) {

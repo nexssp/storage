@@ -5,8 +5,8 @@ go 1.27.3
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/nexssp/flow v0.70.0
-	github.com/nexssp/kernel v0.37.0
+	github.com/nexssp/flow v0.70.3
+	github.com/nexssp/kernel v0.37.10
 	github.com/redis/go-redis/v9 v9.23.0
 	modernc.org/sqlite v1.60.1
 )

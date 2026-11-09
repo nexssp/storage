@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -91,5 +92,56 @@ func TestRegistryOpenClassifiesUnknownErrorAndPreservesCause(t *testing.T) {
 	}
 	if !errors.Is(got, cause) {
 		t.Fatalf("Open error %v does not preserve root cause %v", got, cause)
+	}
+}
+
+type closeTestInstance struct {
+	closeCount int
+	closeErr   error
+}
+
+func (*closeTestInstance) Kind() Kind { return KindKV }
+func (i *closeTestInstance) Close() error {
+	i.closeCount++
+	return i.closeErr
+}
+
+type closeTestBackend struct {
+	instances []*closeTestInstance
+	opened    int
+}
+
+func (*closeTestBackend) Name() string { return "close-test" }
+func (*closeTestBackend) Kind() Kind   { return KindKV }
+func (b *closeTestBackend) Open(map[string]string) (Instance, error) {
+	instance := b.instances[b.opened]
+	b.opened++
+	return instance, nil
+}
+
+func TestRegistryCloseAttemptsAllInstancesAfterCancellation(t *testing.T) {
+	closeErr := errors.New("close failed")
+	instances := []*closeTestInstance{{closeErr: closeErr}, {}}
+	reg := NewRegistry()
+	if err := reg.Register(&closeTestBackend{instances: instances}); err != nil {
+		t.Fatal(err)
+	}
+	declaration := Declaration{Name: "test", Backend: "close-test", Kind: KindKV}
+	for range instances {
+		if _, err := declaration.Open(reg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := reg.Close(ctx)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, closeErr) {
+		t.Fatalf("Close error = %v, want cancellation and backend close error", err)
+	}
+	for index, instance := range instances {
+		if instance.closeCount != 1 {
+			t.Errorf("instance %d Close calls = %d, want 1", index, instance.closeCount)
+		}
 	}
 }

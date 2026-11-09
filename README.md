@@ -34,7 +34,7 @@ Nexss Storage defines a small adapter contract for storage capabilities used by 
 
 ## Install
 
-Requires **Go 1.26.9 or newer**.
+Requires **Go 1.27.3 or newer**.
 
 ```
 go get github.com/nexssp/storage@latest
@@ -55,7 +55,7 @@ Each `Kind` maps to a Kernel interface, so consumers can use the capability appr
 | `tx` | `action.TxRunner` | Transaction boundaries |
 | `rate_limit` | `action.RateLimiter` | Shared token-bucket admission control |
 
-Memory provides a reference implementation for all eight kinds. Persistent backend support is:
+Memory provides a reference implementation for all eight kinds. Its rate limiter keeps independent buckets per key with no eviction, so use a controlled, bounded key space; all in-memory backends are unbounded and intended for short-lived state. Memory KV retains values by reference; callers must treat values and nested mutable data as immutable while stored or shared. Memory idempotency entries are defensive copies, including response body bytes and headers. Persistent backend support is:
 
 | Package | Kinds | Main options |
 | --- | --- | --- |
@@ -63,9 +63,11 @@ Memory provides a reference implementation for all eight kinds. Persistent backe
 | [`postgres`](postgres/) | `kv`, `blob`, `tx` | `dsn`, optional `namespace`, KV `ttl` |
 | [`redis`](redis/) | `kv`, `blob`, `lock` | `addr`, optional credentials/database/namespace, KV `ttl` |
 
+PostgreSQL transaction matching uses the exact configured DSN string. A `tx` declaration and any participating PostgreSQL KV or Blob declaration must use identical DSN strings, including query parameters and their order; different strings are treated as different database identities even if they connect to the same server and database. Reuse the same DSN value across those declarations. Redis lock instances track at most 4096 distinct locally owned active keys; expired entries are pruned, and a new distinct acquisition returns `Unavailable` while the local owner table is full.
+
 ## Optional atomic KV updates
 
-KV instances may additionally implement `storage.AtomicKV` (`storage.AssertAtomicKV`). `Update` serializes a single namespace/key read-modify-write and invokes its callback under the backend transaction/lock; callback errors do not persist a value. Expired values are misses. The callback TTL follows `Set` semantics (non-positive uses the backend default; no default means no expiry). SQLite and PostgreSQL SQL adapters support this capability; ordinary `CacheLayer` behavior is unchanged. In an ambient SQL transaction, a callback error rolls back only the update's savepoint and the surrounding transaction remains usable. SQLite defaults to a 5-second busy timeout for lock contention, so concurrent writers wait for the short transaction instead of failing immediately; an explicit `_busy_timeout`/`_timeout` in the driver DSN is respected.
+KV instances may additionally implement `storage.AtomicKV` (`storage.AssertAtomicKV`). `Update` serializes a single namespace/key read-modify-write and invokes its callback under the backend transaction/lock; callback errors do not persist a value. Expired values are misses. The callback TTL follows `Set` semantics (non-positive uses the backend default; no default means no expiry). SQLite and PostgreSQL SQL adapters support this capability; ordinary `CacheLayer` behavior is unchanged. In an ambient SQL transaction, a callback error rolls back only the update's savepoint and the surrounding transaction remains usable. SQLite configures a 5-second busy timeout with `_pragma=busy_timeout(5000)` unless the DSN already specifies `_pragma`, `_busy_timeout`, or `_timeout`.
 
 ## Nexss Flow 🌀 integration
 
@@ -82,7 +84,9 @@ noop
   -> cache.kv.get @{ key: "greeting" }
 ```
 
-The aliased action surfaces are `kv.{get,set,del}`, `blob.{put,get,del}`, `lock.{acquire,release}`, `fenced.{acquire,release}`, `idem.{claim,complete,release}`, `journal.{get,record}`, `tx.run`, and `rate.check`. The generic `storage.*` actions support KV, Blob, and Lock when a store is selected dynamically. The bundle also wires Kernel middleware through `:cache_store=<alias>` (optionally `:cache_ttl=<duration>`), `:idempotent_store=<alias>`, and `:dedup_store=<alias>`. Attach `@hook:storage.events` to collect cache hit/miss/error events; `storage.probe` is available to inspect the hook from Flow.
+The aliased action surfaces are `kv.{get,set,del}`, `blob.{put,get,del}`, `lock.{acquire,release}`, `fenced.{acquire,release}`, `idem.{claim,complete,release}`, `journal.{get,record}`, `tx.run`, and `rate.check`. The generic `storage.*` actions support KV, Blob, and Lock when a store is selected dynamically. The bundle wires Kernel middleware through `:cache_store=<alias>` (optionally `:cache_ttl=<duration>`), `:idempotent_store=<alias>`, and `:local_dedup`. `:local_dedup` coalesces concurrent requests only within the current process; it does not use a distributed lock. Attach `@hook:storage.events` to collect cache hit/miss/error events; `storage.probe` is available to inspect the hook from Flow.
+
+`:idempotent_store` replays only when the host supplies an explicit key in the execution context with Kernel's `xctx.WithIdempotencyKey`; `RequestID` remains correlation metadata and does not trigger replay.
 
 Blob reads return a compact `{ ref, hit }` result, not payload bytes. Blob operations require authenticated caller-and-tenant scope in the Flow execution context. Basic locks are best-effort and non-fenced.
 
@@ -166,7 +170,7 @@ func main() {
 
 ## Blob references and SQL migrations
 
-Blob APIs return compact typed references rather than payload bytes. `Put` and `Open` use reader-based interfaces, while current memory, Redis, and SQL implementations buffer payloads internally. A reference is an opaque selector, not a filesystem path or authorization token.
+Blob APIs return compact typed references rather than payload bytes. `Put` and `Open` use reader-based interfaces, while current memory, Redis, and SQL implementations buffer payloads internally. A reference is an opaque selector, not a filesystem path or authorization token. The public `blobref.Metadata` JSON field names and meanings are a persisted-format contract used by Redis; changing them requires a keyspace/data migration. `ExpectedSize == 0` means the caller did not specify an expected size, while the stored metadata still confirms the object's actual size.
 
 SQLite and PostgreSQL adapter tables are created only by their embedded migrations. Run the migrations as an explicit deployment/setup step with Goose v3 and the dedicated `nexss_storage_goose_db_version` table; application-owned tables belong in a separate migration stream. `Backend.Open` only connects and never runs DDL. Redis uses a versioned keyspace (default prefix `nexss:storage:v1`).
 
@@ -181,6 +185,7 @@ SQLite and PostgreSQL adapter tables are created only by their embedded migratio
 | [`storage`](.) | `Kind`, `Backend`, `Instance`, `Declaration`, `Registry`, and capability assertions. |
 | [`memory`](memory/) | In-memory reference backends for all storage kinds. |
 | [`sqlite`](sqlite/), [`postgres`](postgres/), [`redis`](redis/) | Persistent backend adapters. |
+| [`blobref`](blobref/) | Shared opaque-reference, integrity, and caller/tenant-scope helpers for BlobStore adapters. |
 | [`nexssflow`](nexssflow/) | `@storage`, aliased and generic actions, middleware wiring, events, and probes. |
 
 ## Development

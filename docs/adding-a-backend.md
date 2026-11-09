@@ -94,52 +94,31 @@ func (k *kvInstance) Set(ctx context.Context, key string, val any, ttl time.Dura
 }
 ```
 
-## 4. Register in init()
+## 4. Register the backend
 
-Two options for registration:
-
-**Option A: Process-wide registration** (simple, matches Flow's
-`@require` model where the bundle's `init()` registers):
-
-```go
-// kv.go
-func init() {
-    storage.Default.Register(kvBackend{})
-}
-```
-
-You'll need to add `storage.Default` (a package-level default
-Registry) to nexssp/storage — currently the Registry is a struct
-created per-Bundle. To support this pattern, the Flow extension's
-Bundle can probe the default Registry for any Backends registered
-after Bundle() returns.
-
-**Option B: Bundle factory** (preferred — keeps Registry scoped to
-the compilation, per AGENTS.md §7):
+Expose a `Register` function that adds the backend to a caller-owned
+Registry. Avoid package-global mutable registries: the Storage Flow bundle
+creates a Registry for its own lifecycle and registers built-in backends
+there.
 
 ```go
-// bundle.go
 package redis
 
-import (
-    "github.com/nexssp/storage"
-)
+import "github.com/nexssp/storage"
 
 func Register(reg *storage.Registry) error {
-    if err := reg.Register(kvBackend{}); err != nil { return err }
-    if err := reg.Register(lockBackend{}); err != nil { return err }
-    return reg.Register(fencedLockBackend{})
+	for _, backend := range []storage.Backend{kvBackend{}, lockBackend{}, fencedLockBackend{}} {
+		if err := reg.Register(backend); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 ```
 
-The Flow extension's Bundle() then calls `redis.Register(reg)` after
-registering the memory backends. This requires the Flow extension to
-import the adapter package, which happens via `@require`.
-
-For v1 of nexssp/storage (this prototype), Option A is not yet
-implemented. Use Option B by importing the adapter package from the
-Flow extension's Bundle — the prototype's `library.go` documents
-where to add the import.
+The Flow extension calls `redis.Register(reg)` while constructing its
+bundle. For the Storage Flow bundle, see `nexssflow/library.go` and
+`nexssflow/materialize.go` for the registry and per-compilation lifecycle.
 
 ## 5. Test conformance
 
@@ -188,7 +167,7 @@ func (kvBackend) Open(opts map[string]string) (storage.Instance, error) {
 ## 7. Ship
 
 - `go.mod` declares `module github.com/nexssp/storage-redis`.
-- `go.mod` requires `github.com/nexssp/storage v0.1.0`.
+- `go.mod` requires `github.com/nexssp/storage v0.6.0`.
 - The package is importable as `github.com/nexssp/storage-redis`.
 - A user flow writes `@require github.com/nexssp/storage-redis v1.0.0`.
 - The Flow extension's `@storage kv:redis { addr: ... }` resolves.

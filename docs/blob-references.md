@@ -37,6 +37,14 @@ The current memory, Redis, and SQL implementations expose stream-based methods b
 
 Every Blob operation requires both authenticated caller and tenant IDs in the request context, as read by `xfile.ScopeFromContext`. Writes bind the object to that caller and tenant. A lookup for another scope is concealed as a miss; opening another scope's reference returns not found. Authorization is based on context and stored ownership metadata, never on `Ref` fields.
 
+The exported `blobref.Metadata` JSON representation is a persisted-format contract: `size` is the confirmed byte count, `digest` is `sha256:<lowercase hex>`, and `caller_id`/`tenant_id` are the authenticated owner identifiers. Redis stores these exact JSON names in its versioned keyspace. Changing field names, types, or meaning requires a storage migration or a new keyspace version; do not treat these tags as an internal serialization detail. `xfile.Ref.Version` is not supported by current adapters, and `ExpectedSize == 0` means no size expectation was supplied (the stored size is still confirmed when the object is opened).
+
+## Shared helpers for adapters
+
+Custom BlobStore implementations can use the public `github.com/nexssp/storage/blobref` package for the same reference and scope rules as the built-in backends. `Scope` reads the authenticated caller and tenant from context; `ScopedKey` derives an unambiguous internal key; `MetadataFor`, `Authorized`, and `CheckOwner` bind and verify ownership; and `NewRef`, `Key`, `Verify`, `ConfirmStored`, and `Info` implement opaque references and integrity checks. `ValidateMetadata` rejects incomplete persisted metadata.
+
+Always obtain scope from trusted authentication middleware and persist owner fields from that scope. A reference is an untrusted selector, not proof of ownership. When an object belongs to another caller or tenant, return the same not-found behavior as the built-in adapters rather than disclosing its existence.
+
 For persistent SQL adapters, the adapter-owned Blob table stores byte count, digest, caller, and tenant metadata beside the object. Apply the embedded Goose migration explicitly before use; opening a backend never creates or changes schema. Redis stores the same metadata alongside the existing versioned keyspace entries.
 
 ## Passing a Storage reference to Sandbox

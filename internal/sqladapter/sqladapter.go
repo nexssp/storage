@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +23,7 @@ import (
 	"github.com/nexssp/kernel/xfile"
 
 	"github.com/nexssp/storage"
-	"github.com/nexssp/storage/internal/blobref"
+	"github.com/nexssp/storage/blobref"
 )
 
 // Backend adapts one SQL driver and storage kind to the storage contract.
@@ -29,6 +31,8 @@ type Backend struct {
 	name, driver, option string
 	kind                 storage.Kind
 }
+
+var sqliteMemorySequence atomic.Uint64
 
 // NewBackend constructs a backend. option is "path" for SQLite or "dsn"
 // for PostgreSQL. SQL schemas must be upgraded separately with Goose.
@@ -41,7 +45,10 @@ func (b *Backend) Kind() storage.Kind { return b.kind }
 
 func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 	for key := range opts {
-		if key != b.option && key != "namespace" && key != "ttl" {
+		allowed := key == b.option ||
+			key == "namespace" && (b.kind == storage.KindKV || b.kind == storage.KindBlob) ||
+			key == "ttl" && b.kind == storage.KindKV
+		if !allowed {
 			return nil, storage.BadRequestf("%s: unknown option %q", b.name, key)
 		}
 	}
@@ -54,7 +61,7 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 		if strings.Contains(addr, "?") {
 			separator = "&"
 		}
-		addr += separator + "_busy_timeout=5000"
+		addr += separator + "_pragma=busy_timeout(5000)"
 	}
 	ttl, err := storage.ParseDuration(opts["ttl"], 0)
 	if err != nil {
@@ -84,7 +91,7 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 		namespace:  namespace,
 		defaultTTL: ttl,
 		postgres:   b.driver == "pgx",
-		databaseID: sha256.Sum256([]byte(b.driver + "\x00" + addr)),
+		databaseID: databaseIdentity(b.driver, opts[b.option]),
 	}
 	if b.kind == storage.KindBlob {
 		return &blobInstance{instance: inst}, nil
@@ -92,8 +99,80 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 	return inst, nil
 }
 
+func databaseIdentity(driver, addr string) [32]byte {
+	if driver == "sqlite" {
+		memory := sqliteMemoryDatabase(addr)
+		addr = sqliteDatabaseIdentity(addr)
+		if memory {
+			addr += "\x00instance:" + strconv.FormatUint(sqliteMemorySequence.Add(1), 10)
+		}
+	}
+	return sha256.Sum256([]byte(driver + "\x00" + addr))
+}
+
+func sqliteMemoryDatabase(addr string) bool {
+	base, rawQuery, hasQuery := strings.Cut(addr, "?")
+	if base != ":memory:" && base != "file::memory:" {
+		return false
+	}
+	if hasQuery {
+		query, err := url.ParseQuery(rawQuery)
+		if err == nil {
+			for _, cache := range query["cache"] {
+				if strings.EqualFold(cache, "shared") {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func sqliteDatabaseIdentity(addr string) string {
+	base, rawQuery, hasQuery := strings.Cut(addr, "?")
+	if filePath, isFile := strings.CutPrefix(base, "file:"); isFile {
+		if filePath != "" && !strings.HasPrefix(filePath, "//") && filePath != ":memory:" {
+			base = "file:" + filepath.Clean(filePath)
+		}
+	} else if base != ":memory:" {
+		base = filepath.Clean(base)
+	}
+	if !hasQuery {
+		return base
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return addr
+	}
+	query.Del("_busy_timeout")
+	query.Del("_timeout")
+	pragmas := query["_pragma"]
+	filtered := pragmas[:0]
+	for _, pragma := range pragmas {
+		normalized := strings.ToLower(strings.TrimSpace(pragma))
+		if strings.HasPrefix(normalized, "busy_timeout(") || strings.HasPrefix(normalized, "busy_timeout=") {
+			continue
+		}
+		filtered = append(filtered, pragma)
+	}
+	if len(filtered) == 0 {
+		query.Del("_pragma")
+	} else {
+		query["_pragma"] = filtered
+	}
+	if len(query) == 0 {
+		return base
+	}
+	return base + "?" + query.Encode()
+}
+
 func hasSQLiteBusyTimeout(addr string) bool {
-	return strings.Contains(addr, "_busy_timeout=") || strings.Contains(addr, "_timeout=") || strings.Contains(addr, "busy_timeout%3d")
+	addr = strings.ToLower(addr)
+	return strings.Contains(addr, "_busy_timeout=") ||
+		strings.Contains(addr, "_timeout=") ||
+		strings.Contains(addr, "_pragma=busy_timeout(") ||
+		strings.Contains(addr, "_pragma=busy_timeout%28") ||
+		strings.Contains(addr, "_pragma=busy_timeout%3d")
 }
 
 type instance struct {

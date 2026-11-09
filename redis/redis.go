@@ -21,10 +21,12 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/nexssp/storage"
-	"github.com/nexssp/storage/internal/blobref"
+	"github.com/nexssp/storage/blobref"
 )
 
 const backendName = "redis"
+
+const maxLockOwners = 4096
 
 type Backend struct{ kind storage.Kind }
 
@@ -62,7 +64,11 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 	if prefix == "" {
 		prefix = "nexss:storage"
 	}
-	if !strings.HasSuffix(prefix, ":v1") {
+	hasVersion := hasVersionSuffix(prefix)
+	if !hasVersion && strings.HasPrefix(opts["namespace"], ":") {
+		hasVersion = hasVersionSuffix(":" + prefix)
+	}
+	if !hasVersion {
 		prefix += ":v1"
 	}
 	client := goredis.NewClient(&goredis.Options{
@@ -74,7 +80,7 @@ func (b *Backend) Open(opts map[string]string) (storage.Instance, error) {
 		_ = client.Close()
 		return nil, storage.Unavailablef(err, "redis: connect")
 	}
-	inst := &instance{client: client, kind: b.kind, prefix: prefix, defaultTTL: ttl, owners: make(map[string]string)}
+	inst := &instance{client: client, kind: b.kind, prefix: prefix, defaultTTL: ttl, owners: make(map[string]lockOwner)}
 	if b.kind == storage.KindBlob {
 		return &blobInstance{instance: inst}, nil
 	}
@@ -96,9 +102,28 @@ type instance struct {
 	prefix     string
 	defaultTTL time.Duration
 	mu         sync.Mutex
-	owners     map[string]string
+	owners     map[string]lockOwner
+	pending    int
 	closeOnce  sync.Once
 	closeErr   error
+}
+
+type lockOwner struct {
+	token     string
+	expiresAt time.Time
+}
+
+func hasVersionSuffix(prefix string) bool {
+	index := strings.LastIndex(prefix, ":v")
+	if index < 0 || index+2 == len(prefix) {
+		return false
+	}
+	for _, digit := range prefix[index+2:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (i *instance) Kind() storage.Kind { return i.kind }
@@ -340,20 +365,45 @@ func (i *instance) TryLock(ctx context.Context, key string, ttl time.Duration) (
 	if ttl <= 0 {
 		return false, storage.BadRequest("redis lock: ttl must be positive")
 	}
+	now := time.Now()
+	i.mu.Lock()
+	for ownerKey, owner := range i.owners {
+		if !owner.expiresAt.After(now) {
+			delete(i.owners, ownerKey)
+		}
+	}
+	_, alreadyOwned := i.owners[key]
+	if !alreadyOwned && len(i.owners)+i.pending >= maxLockOwners {
+		i.mu.Unlock()
+		return false, storage.Unavailable("redis lock: local owner limit reached", errors.New("owner table is full"))
+	}
+	if !alreadyOwned {
+		i.pending++
+	}
+	i.mu.Unlock()
+
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
+		if !alreadyOwned {
+			i.mu.Lock()
+			i.pending--
+			i.mu.Unlock()
+		}
 		return false, storage.Internalf("redis lock: create owner token: %v", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(random[:])
 	redisKey := i.key("lock:" + key)
 	ok, err := i.client.SetNX(ctx, redisKey, token, ttl).Result()
+	i.mu.Lock()
+	if !alreadyOwned {
+		i.pending--
+	}
+	if err == nil && ok {
+		i.owners[key] = lockOwner{token: token, expiresAt: time.Now().Add(ttl)}
+	}
+	i.mu.Unlock()
 	if err != nil {
 		return false, storage.Unavailablef(err, "redis: acquire lock")
-	}
-	if ok {
-		i.mu.Lock()
-		i.owners[key] = token
-		i.mu.Unlock()
 	}
 	return ok, nil
 }
@@ -363,15 +413,27 @@ func (i *instance) Unlock(ctx context.Context, key string) error {
 		return err
 	}
 	i.mu.Lock()
-	token, ok := i.owners[key]
-	delete(i.owners, key)
+	owner, ok := i.owners[key]
+	if ok && !owner.expiresAt.After(time.Now()) {
+		delete(i.owners, key)
+		ok = false
+	}
 	i.mu.Unlock()
 	if !ok {
-		return nil
+		return storage.Conflict("redis lock: no active local owner for key")
 	}
 	const unlock = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`
-	if err := i.client.Eval(ctx, unlock, []string{i.key("lock:" + key)}, token).Err(); err != nil {
+	released, err := i.client.Eval(ctx, unlock, []string{i.key("lock:" + key)}, owner.token).Int64()
+	if err != nil {
 		return storage.Unavailablef(err, "redis: release lock")
+	}
+	i.mu.Lock()
+	if current, exists := i.owners[key]; exists && current.token == owner.token {
+		delete(i.owners, key)
+	}
+	i.mu.Unlock()
+	if released == 0 {
+		return storage.Conflict("redis lock: lock expired or ownership changed before release")
 	}
 	return nil
 }

@@ -1,7 +1,10 @@
 package nexssflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -12,12 +15,28 @@ import (
 )
 
 func storageModifiers() []compiler.Modifier {
-	noopStr := func(b *action.Builder[any, any], _ string) *action.Builder[any, any] { return b }
+	storageOnly := func(name string) compiler.Modifier {
+		return compiler.WithInheritable(compiler.Modifier{
+			Name:      name,
+			ValueKind: compiler.ModifierKindString,
+			Apply: func(_ *action.Builder[any, any], _ string) error {
+				return storage.BadRequestf(":%s requires an @storage declaration", name)
+			},
+		})
+	}
+
 	return []compiler.Modifier{
-		compiler.WithInheritable(compiler.String("cache_store", noopStr)),
-		compiler.WithInheritable(compiler.String("cache_ttl", noopStr)),
-		compiler.WithInheritable(compiler.String("idempotent_store", noopStr)),
-		compiler.WithInheritable(compiler.String("dedup_store", noopStr)),
+		storageOnly("cache_store"),
+		storageOnly("cache_ttl"),
+		storageOnly("idempotent_store"),
+		compiler.WithInheritable(compiler.Modifier{
+			Name:      "local_dedup",
+			ValueKind: compiler.ModifierKindString,
+			Apply: func(b *action.Builder[any, any], _ string) error {
+				b.Dedup(func(request any) string { return requestKey("dedup", request) })
+				return nil
+			},
+		}),
 	}
 }
 
@@ -27,8 +46,8 @@ func storageAdvisor(s *store) compiler.AtomAdviseFunc {
 			return nil
 		}
 
-		var cacheStore, cacheTTL, idemStore, dedupStore string
-		var hasCacheStore, hasCacheTTL, hasIdemStore, hasDedupStore bool
+		var cacheStore, cacheTTL, idemStore string
+		var hasCacheStore, hasCacheTTL, hasIdemStore bool
 
 		remaining := atom.Modifiers[:0]
 		for _, raw := range atom.Modifiers {
@@ -43,9 +62,6 @@ func storageAdvisor(s *store) compiler.AtomAdviseFunc {
 			case "idempotent_store":
 				idemStore = value
 				hasIdemStore = true
-			case "dedup_store":
-				dedupStore = value
-				hasDedupStore = true
 			default:
 				remaining = append(remaining, raw)
 			}
@@ -53,7 +69,10 @@ func storageAdvisor(s *store) compiler.AtomAdviseFunc {
 		atom.Modifiers = remaining
 
 		if hasCacheStore {
-			if err := applyCacheStore(s, builder, cacheStore, cacheTTL); err != nil {
+			if atom.Name == "" {
+				return storage.BadRequest("cache_store requires a named action")
+			}
+			if err := applyCacheStore(s, builder, atom.Name, cacheStore, cacheTTL); err != nil {
 				return err
 			}
 		} else if hasCacheTTL {
@@ -62,12 +81,6 @@ func storageAdvisor(s *store) compiler.AtomAdviseFunc {
 
 		if hasIdemStore {
 			if err := applyIdempotentStore(s, builder, idemStore); err != nil {
-				return err
-			}
-		}
-
-		if hasDedupStore {
-			if err := applyDedupStore(s, builder, dedupStore); err != nil {
 				return err
 			}
 		}
@@ -83,7 +96,7 @@ func splitModifier(raw string) (name, value string) {
 	return raw, ""
 }
 
-func applyCacheStore(s *store, b *action.Builder[any, any], storeName, ttlStr string) error {
+func applyCacheStore(s *store, b *action.Builder[any, any], actionName, storeName, ttlStr string) error {
 	if storeName == "" {
 		return storage.BadRequest("cache_store: store name is required (use :cache_store=NAME)")
 	}
@@ -109,7 +122,7 @@ func applyCacheStore(s *store, b *action.Builder[any, any], storeName, ttlStr st
 	if err != nil {
 		return err
 	}
-	b.Cache(ttl, defaultCacheKey, layer)
+	b.Cache(ttl, func(request any) string { return requestKey(actionName, request) }, layer)
 	return nil
 }
 
@@ -129,28 +142,12 @@ func applyIdempotentStore(s *store, b *action.Builder[any, any], storeName strin
 	return nil
 }
 
-func applyDedupStore(s *store, b *action.Builder[any, any], storeName string) error {
-	if storeName == "" {
-		return storage.BadRequest("dedup_store: store name is required")
-	}
-	inst, err := s.instance(storeName)
-	if err != nil {
-		return err
-	}
-	if _, err := storage.AssertMutex(inst); err != nil {
-		return err
-	}
-	b.Dedup(defaultCacheKey)
-	return nil
-}
-
-func defaultCacheKey(request any) string {
-	if request == nil {
-		return ""
-	}
+func requestKey(namespace string, request any) string {
 	data, err := json.Marshal(request)
 	if err != nil {
+		slog.Warn("storage middleware bypassed for request that cannot be encoded", "namespace", namespace, "error", err)
 		return ""
 	}
-	return string(data)
+	digest := sha256.Sum256(data)
+	return namespace + ":" + hex.EncodeToString(digest[:])
 }

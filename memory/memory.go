@@ -11,12 +11,15 @@
 // size bounds; unbounded growth in production will exhaust memory.
 // Use them in production only for short-lived state (request-scoped
 // caches, test fixtures).
+// KV values are retained by reference and must be treated as immutable.
 package memory
 
 import (
 	"bytes"
 	"context"
 	"io"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -24,13 +27,22 @@ import (
 	"github.com/nexssp/kernel/xfile"
 
 	"github.com/nexssp/storage"
-	"github.com/nexssp/storage/internal/blobref"
+	"github.com/nexssp/storage/blobref"
 )
 
 // backendName is the Name() value shared by every in-process backend
 // in this package. All memory backends register under the same Name;
 // the (Name, Kind) pair keeps them distinct in the Registry.
 const backendName = "memory"
+
+func validateOptions(opts map[string]string, allowed ...string) error {
+	for key := range opts {
+		if !slices.Contains(allowed, key) {
+			return storage.BadRequestf("memory: unknown option %q", key)
+		}
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // KindKV — action.CacheLayer[any]
@@ -46,6 +58,9 @@ func (KV) Name() string       { return backendName }
 func (KV) Kind() storage.Kind { return storage.KindKV }
 
 func (KV) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts, "ttl"); err != nil {
+		return nil, err
+	}
 	ttl, err := storage.ParseDuration(opts["ttl"], 0)
 	if err != nil {
 		return nil, err
@@ -140,7 +155,10 @@ func NewBlob() *Blob { return &Blob{} }
 func (Blob) Name() string       { return backendName }
 func (Blob) Kind() storage.Kind { return storage.KindBlob }
 
-func (Blob) Open(_ map[string]string) (storage.Instance, error) {
+func (Blob) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
 	return &blobInstance{data: make(map[string]blobRecord)}, nil
 }
 
@@ -270,7 +288,10 @@ func NewLock() *Lock { return &Lock{} }
 func (Lock) Name() string       { return backendName }
 func (Lock) Kind() storage.Kind { return storage.KindLock }
 
-func (Lock) Open(_ map[string]string) (storage.Instance, error) {
+func (Lock) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
 	return &lockInstance{holders: make(map[string]*lockHolder)}, nil
 }
 
@@ -330,7 +351,10 @@ func NewFencedLock() *FencedLock { return &FencedLock{} }
 func (FencedLock) Name() string       { return backendName }
 func (FencedLock) Kind() storage.Kind { return storage.KindFencedLock }
 
-func (FencedLock) Open(_ map[string]string) (storage.Instance, error) {
+func (FencedLock) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
 	return &fencedInstance{holders: make(map[string]*fencedHolder)}, nil
 }
 
@@ -416,6 +440,9 @@ func (Idem) Name() string       { return backendName }
 func (Idem) Kind() storage.Kind { return storage.KindIdem }
 
 func (Idem) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts, "ttl"); err != nil {
+		return nil, err
+	}
 	ttl, err := storage.ParseDuration(opts["ttl"], 0)
 	if err != nil {
 		return nil, err
@@ -433,6 +460,16 @@ type idemSlot struct {
 	claimToken string
 	claimExp   time.Time
 	claimHash  string
+}
+
+func cloneIdempotencyEntry(entry action.IdempotencyEntry) action.IdempotencyEntry {
+	entry.Body = append([]byte(nil), entry.Body...)
+	if entry.Headers != nil {
+		headers := make(map[string]string, len(entry.Headers))
+		maps.Copy(headers, entry.Headers)
+		entry.Headers = headers
+	}
+	return entry
 }
 
 type idemInstance struct {
@@ -456,7 +493,7 @@ func (i *idemInstance) Get(_ context.Context, key string) (action.IdempotencyEnt
 		delete(i.entries, key)
 		return action.IdempotencyEntry{}, false
 	}
-	return slot.entry, true
+	return cloneIdempotencyEntry(slot.entry), true
 }
 
 func (i *idemInstance) Set(_ context.Context, key string, entry action.IdempotencyEntry, ttl time.Duration) {
@@ -469,6 +506,7 @@ func (i *idemInstance) Set(_ context.Context, key string, entry action.Idempoten
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
 	}
+	entry = cloneIdempotencyEntry(entry)
 	i.entries[key] = idemSlot{entry: entry, expires: exp}
 }
 
@@ -492,7 +530,7 @@ func (i *idemInstance) Claim(_ context.Context, key, requestHash string, leaseTT
 			if slot.entry.RequestHash != requestHash {
 				return action.IdempotencyClaim{State: action.IdempotencyClaimConflict}, nil
 			}
-			return action.IdempotencyClaim{State: action.IdempotencyClaimCompleted, Entry: slot.entry}, nil
+			return action.IdempotencyClaim{State: action.IdempotencyClaimCompleted, Entry: cloneIdempotencyEntry(slot.entry)}, nil
 		}
 		// In-progress.
 		if slot.claimHash != requestHash {
@@ -527,6 +565,7 @@ func (i *idemInstance) Complete(_ context.Context, key, token string, entry acti
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
 	}
+	entry = cloneIdempotencyEntry(entry)
 	i.entries[key] = idemSlot{entry: entry, expires: exp}
 	return nil
 }
@@ -562,7 +601,10 @@ func NewJournal() *Journal { return &Journal{} }
 func (Journal) Name() string       { return backendName }
 func (Journal) Kind() storage.Kind { return storage.KindJournal }
 
-func (Journal) Open(_ map[string]string) (storage.Instance, error) {
+func (Journal) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
 	return &journalInstance{steps: make(map[string]map[string][]byte)}, nil
 }
 
@@ -620,7 +662,10 @@ func NewTx() *Tx { return &Tx{} }
 func (Tx) Name() string       { return backendName }
 func (Tx) Kind() storage.Kind { return storage.KindTx }
 
-func (Tx) Open(_ map[string]string) (storage.Instance, error) {
+func (Tx) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
 	return &txInstance{}, nil
 }
 
@@ -647,6 +692,9 @@ func (RateLimit) Name() string       { return backendName }
 func (RateLimit) Kind() storage.Kind { return storage.KindRateLimit }
 
 func (RateLimit) Open(opts map[string]string) (storage.Instance, error) {
+	if err := validateOptions(opts, "rps", "burst"); err != nil {
+		return nil, err
+	}
 	rps, err := parseRPS(opts["rps"])
 	if err != nil {
 		return nil, err
@@ -661,29 +709,31 @@ func (RateLimit) Open(opts map[string]string) (storage.Instance, error) {
 	if burst < 1 {
 		burst = 1
 	}
-	return &rateLimitInstance{rps: rps, burst: burst}, nil
+	return &rateLimitInstance{buckets: make(map[string]*tokenBucket), rps: rps, burst: burst}, nil
 }
 
 type rateLimitInstance struct {
-	mu     sync.Mutex
-	bucket *tokenBucket
-	rps    float64
-	burst  int
+	mu      sync.Mutex
+	buckets map[string]*tokenBucket
+	rps     float64
+	burst   int
 }
 
 func (r *rateLimitInstance) Kind() storage.Kind { return storage.KindRateLimit }
 func (r *rateLimitInstance) Close() error       { return nil }
 
-func (r *rateLimitInstance) Allow(ctx context.Context, _ string) (bool, error) {
+func (r *rateLimitInstance) Allow(ctx context.Context, key string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.bucket == nil {
-		r.bucket = newTokenBucket(r.rps, r.burst)
+	bucket := r.buckets[key]
+	if bucket == nil {
+		bucket = newTokenBucket(r.rps, r.burst)
+		r.buckets[key] = bucket
 	}
-	return r.bucket.allow(time.Now()), nil
+	r.mu.Unlock()
+	return bucket.allow(time.Now()), nil
 }
 
 var _ action.RateLimiter = (*rateLimitInstance)(nil)

@@ -16,6 +16,7 @@ import (
 
 const ID = "storage"
 
+//go:embed nflows/*.nflow
 var fixturesFS embed.FS
 
 func init() {
@@ -36,8 +37,7 @@ func init() {
 // store. The order is:
 //
 //  1. OnPreprocess  creates the store from meta["storage"] once,
-//     installs the :cache_store= / :idempotent_store= /
-//     :dedup_store= advisor against it, and records it
+//     installs the storage-backed advisor against it, and records it
 //     in meta[storeMetaKey].
 //  2. Materialize   reuses the store from meta (does NOT create a
 //     second one) and mounts <alias>.<kind>.<op>
@@ -93,7 +93,7 @@ func registerPersistentBackends(reg *storage.Registry) {
 // onPreprocess runs after Preprocess, once per compilation. It creates
 // the per-compilation store (idempotently — the same meta map is
 // shared with Materialize and WrapPipeline) and installs the storage
-// advisor that handles the three :*_store= modifiers.
+// advisor that handles cache and idempotency modifiers.
 //
 // When the source declares no @storage directives, this returns an
 // empty contribution: no store, no advisor, no runtime wrapper.

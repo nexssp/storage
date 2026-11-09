@@ -68,8 +68,9 @@
 # ============================================================================
 #
 # The :idempotent_store=idem modifier wires Kernel's
-# IdempotencyMiddleware. A second call with the same RequestID
-# replays the cached result without re-executing the handler.
+# IdempotencyMiddleware. The host must attach an explicit key with
+# xctx.WithIdempotencyKey; RequestID alone is correlation metadata and
+# does not trigger replay.
 
 @pipeline charge_handler
   const @{ value: { charged: true, amount: 100, currency: "USD" } }

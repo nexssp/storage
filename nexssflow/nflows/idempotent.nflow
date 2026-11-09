@@ -1,4 +1,4 @@
-@description "Idempotent action backed by a declared idem store"
+@description "Idempotent-store wiring; replay requires a host-supplied explicit idempotency key"
 @require github.com/nexssp/storage
 
 @assert: result == "ok"

@@ -12,6 +12,22 @@ jobs:
     name: build · lint · test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      NEXSS_STORAGE_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/nexss_storage?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: nexss_storage
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nexss_storage"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -51,6 +67,9 @@ jobs:
 
       - name: Build
         run: task build
+
+      - name: Lint Flow examples
+        run: task examples
 
       - name: Run CI gate
         run: task ci
