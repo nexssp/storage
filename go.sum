@@ -43,10 +43,10 @@ github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsRe
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
-github.com/nexssp/flow v0.73.0 h1:Ou5u/q6BFhBH4aOt6u25L9O5VmoYyDl/5UVZm8EHPDw=
-github.com/nexssp/flow v0.73.0/go.mod h1:oNvm/uNZf9GmI1yd6B1e9sHQdAYS6nYDMfmxaSGBFQk=
-github.com/nexssp/kernel v0.38.1 h1:Vt/negHWO69trF4lI44kekFD0mqmivL381OwNxf3H6M=
-github.com/nexssp/kernel v0.38.1/go.mod h1:v68R5GiEw94klHsD4PIazt+5oMYkiNFAL5iu7AG5dw0=
+github.com/nexssp/flow v0.80.0 h1:OqcbD1n6NIHlRpyWzGCNqwRBPcQD+II4KBykFLKtZCo=
+github.com/nexssp/flow v0.80.0/go.mod h1:lckkBXZZ2ZvCpB2HLItLRvb/LorKkeB07kG+1w1Y6dI=
+github.com/nexssp/kernel v0.39.1 h1:GLUKO5lmIhBi+d32QweWLJJysjb7D9zx6LtV3FMOj5c=
+github.com/nexssp/kernel v0.39.1/go.mod h1:v68R5GiEw94klHsD4PIazt+5oMYkiNFAL5iu7AG5dw0=
 github.com/nexssp/validation v0.5.0 h1:M3XGp4lO2axpLljfx27WguK8A2g/zCBv6VxiY55MoUw=
 github.com/nexssp/validation v0.5.0/go.mod h1:7uFRJSn6X3eVYBp1Axazf8D05tbVZyR+GDqKyiQoODE=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
