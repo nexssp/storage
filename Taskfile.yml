@@ -51,7 +51,7 @@ tasks:
   setup: { desc: "[setup:files, tools]", deps: [setup:files, tools] }
 
   examples:
-    desc: Lint every .nflow file and boot the server examples under a timeout
+    desc: Lint every .nflow file under nexssflow
     cmds:
       - '{{.NFLOW}} lint ./nexssflow/...'
 

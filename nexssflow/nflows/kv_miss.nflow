@@ -9,5 +9,5 @@
 @hook:storage.events
 
 noop
--> cache.kv.get @{ key: "absent" }
+-> cache.kv.get(key: "absent")
 -> storage.probe

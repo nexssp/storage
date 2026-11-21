@@ -7,5 +7,5 @@
 @storage kv:memory as cache { ttl: "5m" }
 
 noop
--> cache.kv.set @{ key: "greeting", value: "hello" }
--> cache.kv.get @{ key: "greeting" }
+-> cache.kv.set(key: "greeting", value: "hello")
+-> cache.kv.get(key: "greeting")

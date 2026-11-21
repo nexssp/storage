@@ -22,11 +22,11 @@ named hook.
 ```nflow
 @storage kv:memory as cache { ttl: "5m" }
 
-noop -> storage.kv.set @{ store: "cache", key: "k", value: "v" }
-noop -> storage.kv.get @{ store: "cache", key: "k" }
+noop -> storage.kv.set(store: "cache", key: "k", value: "v")
+noop -> storage.kv.get(store: "cache", key: "k")
 
 # Optional: keep the current request available to the next action.
-cache.kv.get @{ key: .tenant_id, request: . }
+cache.kv.get(key: .tenant_id, request: .)
 ```
 
 Eight actions: `storage.kv.{get,set,del}`, `storage.blob.{get,put,del}`,
@@ -50,7 +50,7 @@ existing result shape for current callers.
 # Wire Kernel's CacheMiddleware to use the declared store.
 # First call misses → handler runs → back-fills.
 # Second call hits → handler does not run.
-http.request:cache_store=cache:cache_ttl=30s @{ url: "https://api.example/users/1" }
+http.request :cache_store=cache :cache_ttl=30s (url: "https://api.example/users/1")
 ```
 
 Storage modifiers require a matching `@storage` declaration and are wired by the `AtomAdvise` hook. `:local_dedup` is process-local concurrent request coalescing and does not require a store:
@@ -77,9 +77,9 @@ Declare exactly one `tx` store to run the **whole Flow pipeline** in a transacti
 @storage kv:sqlite as customers { path: "./data/app.db" }
 
 noop
-  -> customers.kv.set @{ key: "customer-42", value: "Maks" }
-  -> transaction.tx.run @{ step: "save-customer" }
-  -> customers.kv.get @{ key: "customer-42" }
+  -> customers.kv.set(key: "customer-42", value: "Maks")
+  -> transaction.tx.run(step: "save-customer")
+  -> customers.kv.get(key: "customer-42")
 ```
 
 `tx.run` is an optional assertion that the transaction scope is active; it does not open a nested transaction. A pipeline error rolls back and success commits. A mismatched SQL database is rejected rather than used outside the transaction. Apply the adapter's embedded Goose migration explicitly before running a SQLite/PostgreSQL example. The in-memory `tx` backend is only a test double and does not provide atomicity or rollback. A pipeline can declare only one transaction store.
@@ -90,7 +90,7 @@ noop
 @storage kv:memory as cache { ttl: "5m" }
 @hook:storage.events
 
-noop -> storage.kv.get @{ store: "cache", key: "k" }
+noop -> storage.kv.get(store: "cache", key: "k")
 ```
 
 The `storage.events` hook stamps a `*StorageEvents` accumulator into

@@ -6,5 +6,5 @@
 @storage blob:memory as files { }
 
 noop
--> files.blob.put @{ key: "doc", data: "payload-bytes" }
--> files.blob.get @{ key: "doc" }
+-> files.blob.put(key: "doc", data: "payload-bytes")
+-> files.blob.get(key: "doc")

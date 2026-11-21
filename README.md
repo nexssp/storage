@@ -84,8 +84,8 @@ The Flow bundle registers the built-in memory, SQLite, PostgreSQL, and Redis bac
 @assert: result.value == "hello"
 
 noop
-  -> cache.kv.set @{ key: "greeting", value: "hello" }
-  -> cache.kv.get @{ key: "greeting" }
+  -> cache.kv.set(key: "greeting", value: "hello")
+  -> cache.kv.get(key: "greeting")
 ```
 
 The aliased action surfaces are `kv.{get,set,del}`, `blob.{put,get,del}`, `lock.{acquire,release}`, `fenced.{acquire,release}`, `idem.{claim,complete,release}`, `journal.{get,record}`, `tx.run`, and `rate.check`. The generic `storage.*` actions support KV, Blob, and Lock when a store is selected dynamically. The bundle wires Kernel middleware through `:cache_store=<alias>` (optionally `:cache_ttl=<duration>`), `:idempotent_store=<alias>`, and `:local_dedup`. `:local_dedup` coalesces concurrent requests only within the current process; it does not use a distributed lock. Attach `@hook:storage.events` to collect cache hit/miss/error events; `storage.probe` is available to inspect the hook from Flow.
@@ -103,9 +103,9 @@ Exactly one `@storage tx:<backend>` declaration wraps the entire compiled Flow p
 @storage kv:sqlite as customers { path: "./data/app.db" }
 
 noop
-  -> customers.kv.set @{ key: "customer-42", value: "Maks" }
-  -> transaction.tx.run @{ step: "save-customer" }
-  -> customers.kv.get @{ key: "customer-42" }
+  -> customers.kv.set(key: "customer-42", value: "Maks")
+  -> transaction.tx.run(step: "save-customer")
+  -> customers.kv.get(key: "customer-42")
 ```
 
 Apply the adapter's embedded Goose migration before executing this example; opening a backend never creates the schema. Only one transaction store may be declared per pipeline. The in-memory `tx` backend is a test double and does not provide rollback or atomicity. The Flow fenced-lock namespace still does not expose lease renewal, and the generic `storage.*` namespace is limited to KV, Blob, and Lock.

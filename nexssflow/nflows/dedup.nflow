@@ -3,4 +3,5 @@
 
 @assert: result == "ok"
 
-runtime.const:local_dedup @{ value: "ok" }
+"ok"
+-> noop :local_dedup

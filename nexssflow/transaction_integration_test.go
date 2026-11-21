@@ -103,11 +103,11 @@ func TestFlowPipelineTransactionCommitsAndRollsBackStorageKV(t *testing.T) {
 
 	declaration := fmt.Sprintf("@storage tx:sqlite as tx { path: %q }\n@storage kv:sqlite as cache { path: %q }\n", path, path)
 	successSource := declaration + `
-noop
--> cache.kv.set @{ key: "committed", value: "visible" }
--> tx.tx.run @{ step: "whole-flow" }
--> cache.kv.get @{ key: "committed" }
-`
+	noop
+	-> cache.kv.set(key: "committed", value: "visible")
+	-> tx.tx.run(step: "whole-flow")
+	-> cache.kv.get(key: "committed")
+	`
 	execution, err := runner.Execute(context.Background(), cfg, successSource, "storage-transaction-success.nflow", nil)
 	if err != nil {
 		t.Fatalf("execute committing Flow: %v", err)
@@ -118,10 +118,10 @@ noop
 	}
 
 	failureSource := declaration + `
-noop
--> cache.kv.set @{ key: "rolled-back", value: "hidden" }
--> runtime.fail @{ message: "force transaction rollback" }
-`
+	noop
+	-> cache.kv.set(key: "rolled-back", value: "hidden")
+	-> runtime.fail(message: "force transaction rollback")
+	`
 	if _, err := runner.Execute(context.Background(), cfg, failureSource, "storage-transaction-rollback.nflow", nil); err == nil {
 		t.Fatal("failing Flow pipeline unexpectedly succeeded")
 	}

@@ -46,20 +46,21 @@
 # ============================================================================
 #
 # The origin pipeline simulates an expensive API call. The
-# :cache_store=cache modifier wires Kernel's CacheMiddleware to use
-# the declared "cache" store. The TTL (5m) comes from the @storage
+# :cache_store=cache modifier wires Kernel's CacheMiddleware to use the
+# declared "cache" store. The TTL (5m) comes from the @storage
 # declaration — not repeated on the action.
 #
 # First call: cache MISS → origin pipeline runs → result back-filled.
 # Second call: cache HIT  → origin pipeline does NOT run.
 
 @pipeline origin_user
-  # In production: http.request @{ url: "https://api.example/users/1" }
-  # For the showcase we use const to keep it dependency-free.
-  const @{ value: { id: 1, name: "Alice", email: "alice@example.com" } }
+  # In production: http.request(url: "https://api.example/users/1")
+  # For the showcase we return an object directly to keep it dependency-free.
+  { id: 1, name: "Alice", email: "alice@example.com" }
 @end
 
-@pipeline fetch_cached_user :cache_store=cache
+@pipeline fetch_cached_user
+  :cache_store=cache
   pipeline.origin_user
 @end
 
@@ -73,10 +74,11 @@
 # does not trigger replay.
 
 @pipeline charge_handler
-  const @{ value: { charged: true, amount: 100, currency: "USD" } }
+  { charged: true, amount: 100, currency: "USD" }
 @end
 
-@pipeline charge :idempotent_store=idem
+@pipeline charge
+  :idempotent_store=idem
   pipeline.charge_handler
 @end
 
@@ -88,9 +90,9 @@
 # acquire the same key, it gets acquired=false (not an error).
 
 @pipeline process_job
-  locks.acquire @{ key: "job:cleanup", ttl: "30s" }
-  -> const @{ value: { status: "processed", worker: "w1" } }
-  -> locks.release @{ key: "job:cleanup" }
+  locks.acquire(key: "job:cleanup", ttl: "30s")
+  -> { status: "processed", worker: "w1" }
+  -> locks.release(key: "job:cleanup")
 @end
 
 # ============================================================================
@@ -98,8 +100,8 @@
 # ============================================================================
 
 @pipeline store_document
-  files.blob.put @{ key: "reports/2026/q4.json", data: { revenue: 1200000, quarter: "Q4" } }
-  -> files.blob.get @{ key: "reports/2026/q4.json" }
+  files.blob.put(key: "reports/2026/q4.json", data: { revenue: 1200000, quarter: "Q4" })
+  -> files.blob.get(key: "reports/2026/q4.json")
 @end
 
 # ============================================================================
@@ -110,7 +112,7 @@
 # events to prove the miss was recorded.
 
 @pipeline observe_cache_miss
-  cache.kv.get @{ key: "definitely-missing-key" }
+  cache.kv.get(key: "definitely-missing-key")
   -> storage.probe
 @end
 

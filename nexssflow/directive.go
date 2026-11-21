@@ -25,7 +25,7 @@ import (
 // The actions `storage.kv.get`, `storage.kv.set`, etc. reference the
 // store by name via the `store:` argument:
 //
-//	storage.kv.get @{ store: "kv:memory", key: "user:1" }
+//	storage.kv.get(store: "kv:memory", key: "user:1")
 func storageDirective() compiler.Directive {
 	return compiler.Directive{
 		Name:    "storage",

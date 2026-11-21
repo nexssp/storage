@@ -6,5 +6,5 @@
 @storage lock:memory as locks { }
 
 noop
--> locks.acquire @{ key: "job:1", ttl: "30s" }
--> locks.release @{ key: "job:1" }
+-> locks.acquire(key: "job:1", ttl: "30s")
+-> locks.release(key: "job:1")

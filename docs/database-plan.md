@@ -50,7 +50,7 @@ Redis does not use Goose or SQL migration files. Keep keys namespaced and versio
 
 ## Sandbox engine and migration presets
 
-This section records the contract for a Flow sandbox that invokes explicit setup/deployment work; **the runtime integration is not implemented in this repository or in its pinned Flow dependency (`github.com/nexssp/flow v0.70.3`)**. The inspected dependency has no `sandbox.exec` action or container dispatch integration. Its `external.exec` action runs a host process and is not an isolated sandbox; do not use or describe it as one. Do not treat the design below as existing Flow CLI commands.
+This section records the contract for a Flow sandbox that invokes explicit setup/deployment work; **the runtime integration is not implemented in this repository or in its pinned Flow dependency (`github.com/nexssp/flow v0.96.0`)**. The inspected release has no `sandbox.exec` action or container dispatch integration. Its `external.exec` action runs a host process and is not an isolated sandbox; do not use or describe it as one. Do not treat the design below as existing Flow CLI commands.
 
 The storage bundle can open a PostgreSQL backend when the host provides a reachable DSN, but the current `@storage` declaration receives literal options at compile/preprocess time. It does not expand `${DATABASE_URL}` or receive credentials from a secret manager. A production Flow sandbox integration therefore also needs Flow-side runtime support and a trusted secret-injection/configuration path; this storage-only change does not add that integration. The exact local PostgreSQL example is in [`examples/postgres/`](../examples/postgres/).
 

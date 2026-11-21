@@ -10,7 +10,7 @@ import (
 // context. Use it after @hook:storage.events to inspect what happened:
 //
 //	@hook:storage.events
-//	cache.kv.get @{ key: "missing-key" }
+//	cache.kv.get(key: "missing-key")
 //	-> storage.probe
 //
 // The result is a summary: { hits: N, misses: N, errors: N, events: [...] }
