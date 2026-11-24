@@ -72,6 +72,8 @@ func (KV) Open(opts map[string]string) (storage.Instance, error) {
 	}
 	return &kvInstance{
 		data:         make(map[string]kvItem),
+		pages:        make(map[string][]storage.KVPageItem),
+		pageCursors:  make(map[string]map[string]int),
 		ttl:          ttl,
 		tenantScoped: opts["tenant_scope"] == "tenant",
 	}, nil
@@ -85,6 +87,8 @@ type kvItem struct {
 type kvInstance struct {
 	mu           sync.RWMutex
 	data         map[string]kvItem
+	pages        map[string][]storage.KVPageItem
+	pageCursors  map[string]map[string]int
 	ttl          time.Duration
 	tenantScoped bool
 }

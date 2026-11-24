@@ -429,6 +429,41 @@ type AtomicKV interface {
 	Update(ctx context.Context, key string, fn func(current any, hit bool) (next any, ttl time.Duration, err error)) error
 }
 
+// KVPageItem is one value from a PagedKV stream. Cursor identifies
+// the item within that stream and preserves append order independently of its
+// value's representation.
+type KVPageItem struct {
+	Cursor string `json:"cursor"`
+	Value  any    `json:"value"`
+}
+
+// KVPage is a cursor-based slice of an append-only PagedKV stream.
+type KVPage struct {
+	Items       []KVPageItem `json:"items"`
+	CursorFound bool         `json:"cursor_found"`
+	HasMore     bool         `json:"has_more"`
+}
+
+// PagedKV stores append-only, ordered values under a key. Implementations must
+// not impose a hidden page-size maximum or retention limit. Cursors are unique
+// within a key; Page reports an unknown non-empty cursor with CursorFound=false.
+type PagedKV interface {
+	Append(ctx context.Context, key, cursor string, value any) error
+	Page(ctx context.Context, key, after string, limit int) (KVPage, error)
+}
+
+// AssertPagedKV asserts that inst provides the optional PagedKV capability.
+func AssertPagedKV(inst Instance) (PagedKV, error) {
+	if inst.Kind() != KindKV {
+		return nil, BadRequestf("storage: instance is kind %q, expected %q", inst.Kind(), KindKV)
+	}
+	store, ok := inst.(PagedKV)
+	if !ok {
+		return nil, Internalf("storage: instance of kind %q does not support PagedKV", inst.Kind())
+	}
+	return store, nil
+}
+
 // AssertAtomicKV asserts that inst provides the optional atomic KV capability.
 func AssertAtomicKV(inst Instance) (AtomicKV, error) {
 	if inst.Kind() != KindKV {

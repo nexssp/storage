@@ -40,6 +40,7 @@ func buildLibrary() action.Library {
 			kvGetAction(),
 			kvSetAction(),
 			kvDelAction(),
+			kvPageAction(),
 			// Blob
 			blobGetAction(),
 			blobPutAction(),
@@ -188,6 +189,40 @@ func kvDelAction() action.AnyAction {
 		}).
 		Description("Delete a key from a KV store").
 		Tag("storage", "kv", "del").
+		Build()
+}
+
+type kvPageReq struct {
+	Store string `json:"store"`
+	Key   string `json:"key"`
+	After string `json:"after,omitempty"`
+	Limit int    `json:"limit"`
+}
+
+func kvPageAction() action.AnyAction {
+	return action.New("storage.kv.page",
+		func(ctx context.Context, req kvPageReq) (storage.KVPage, error) {
+			s, err := currentStore(ctx)
+			if err != nil {
+				return storage.KVPage{}, err
+			}
+			inst, err := s.instance(req.Store)
+			if err != nil {
+				return storage.KVPage{}, err
+			}
+			pages, err := storage.AssertPagedKV(inst)
+			if err != nil {
+				return storage.KVPage{}, err
+			}
+			page, err := pages.Page(ctx, req.Key, req.After, req.Limit)
+			if err != nil {
+				recordStorageEvent(ctx, "error", req.Store, "storage.kv.page", req.Key)
+				return storage.KVPage{}, storage.Unavailable("storage.kv.page failed", err)
+			}
+			return page, nil
+		}).
+		Description("Read a cursor-based page from an append-only KV stream without a fixed page or retention cap").
+		Tag("storage", "kv", "page").
 		Build()
 }
 

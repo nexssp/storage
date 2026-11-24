@@ -25,39 +25,41 @@ func applyEmbeddedMigrations(t *testing.T, db *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "00001_create_storage_tables.sql" {
+	if len(entries) != 2 || entries[0].Name() != "00001_create_storage_tables.sql" || entries[1].Name() != "00002_create_paged_kv.sql" {
 		t.Fatalf("unexpected migration files: %v", entries)
 	}
-	body, err := fs.ReadFile(Migrations(), entries[0].Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(string(body), "-- +goose Up") {
-		t.Fatalf("migration must use a Goose Up section: %q", body)
-	}
-	var sqlText strings.Builder
-	inUp := false
-	for line := range strings.SplitSeq(string(body), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "-- +goose Up") {
-			inUp = true
-			continue
+	for _, entry := range entries {
+		body, err := fs.ReadFile(Migrations(), entry.Name())
+		if err != nil {
+			t.Fatal(err)
 		}
-		if strings.HasPrefix(trimmed, "-- +goose ") {
-			inUp = false
-			continue
+		if !strings.HasPrefix(string(body), "-- +goose Up") {
+			t.Fatalf("migration must use a Goose Up section: %q", body)
 		}
-		if inUp && !strings.HasPrefix(trimmed, "--") {
-			sqlText.WriteString(line)
-			sqlText.WriteByte('\n')
+		var sqlText strings.Builder
+		inUp := false
+		for line := range strings.SplitSeq(string(body), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "-- +goose Up") {
+				inUp = true
+				continue
+			}
+			if strings.HasPrefix(trimmed, "-- +goose ") {
+				inUp = false
+				continue
+			}
+			if inUp && !strings.HasPrefix(trimmed, "--") {
+				sqlText.WriteString(line)
+				sqlText.WriteByte('\n')
+			}
 		}
-	}
-	for statement := range strings.SplitSeq(sqlText.String(), ";") {
-		if strings.TrimSpace(statement) == "" {
-			continue
-		}
-		if _, err := db.ExecContext(t.Context(), statement); err != nil {
-			t.Fatalf("apply migration: %v\nSQL: %s", err, statement)
+		for statement := range strings.SplitSeq(sqlText.String(), ";") {
+			if strings.TrimSpace(statement) == "" {
+				continue
+			}
+			if _, err := db.ExecContext(t.Context(), statement); err != nil {
+				t.Fatalf("apply migration %s: %v\nSQL: %s", entry.Name(), err, statement)
+			}
 		}
 	}
 }

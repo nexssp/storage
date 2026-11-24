@@ -17,7 +17,7 @@ func TestPostgresBackendRegistrationAndMigrationFiles(t *testing.T) {
 		t.Fatalf("registered names: %v", got)
 	}
 	files, err := fs.ReadDir(Migrations(), ".")
-	if err != nil || len(files) != 1 || files[0].Name() != "00001_create_storage_tables.sql" {
+	if err != nil || len(files) != 2 || files[0].Name() != "00001_create_storage_tables.sql" || files[1].Name() != "00002_create_paged_kv.sql" {
 		t.Fatalf("migration files=%v err=%v", files, err)
 	}
 	body, err := fs.ReadFile(Migrations(), files[0].Name())

@@ -51,6 +51,7 @@ func TestBundleShape(t *testing.T) {
 		"storage.kv.get":       false,
 		"storage.kv.set":       false,
 		"storage.kv.del":       false,
+		"storage.kv.page":      false,
 		"storage.blob.get":     false,
 		"storage.blob.put":     false,
 		"storage.blob.del":     false,
@@ -66,6 +67,42 @@ func TestBundleShape(t *testing.T) {
 		if !saw {
 			t.Errorf("missing generic action %q", name)
 		}
+	}
+}
+
+func TestKVPageActionReturnsCursorAndMoreStatus(t *testing.T) {
+	decl := storage.Declaration{Name: "pages", Backend: "memory", Kind: storage.KindKV}
+	b := newBundle()
+	s := b.newStore([]storage.Declaration{decl})
+	inst, err := s.instance("pages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, err := storage.AssertPagedKV(inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := storeKey.With(context.Background(), s)
+	for _, item := range []struct {
+		cursor string
+		value  string
+	}{{"first", "one"}, {"second", "two"}, {"third", "three"}} {
+		if err := pages.Append(ctx, "activity", item.cursor, item.value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := kvPageAction().DoAny(ctx, map[string]any{
+		"store": "pages", "key": "activity", "after": "first", "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, ok := result.(storage.KVPage)
+	if !ok || !page.CursorFound || !page.HasMore || len(page.Items) != 1 || page.Items[0].Cursor != "second" {
+		t.Fatalf("page result = %#v", result)
+	}
+	if page.Items[0].Value != "two" {
+		t.Fatalf("page item value = %#v, want two", page.Items[0].Value)
 	}
 }
 

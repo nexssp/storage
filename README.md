@@ -69,6 +69,12 @@ PostgreSQL transaction matching uses the exact configured DSN string. A `tx` dec
 
 KV instances may additionally implement `storage.AtomicKV` (`storage.AssertAtomicKV`). `Update` serializes a single namespace/key read-modify-write and invokes its callback under the backend transaction/lock; callback errors do not persist a value. Expired values are misses. The callback TTL follows `Set` semantics (non-positive uses the backend default; no default means no expiry). SQLite and PostgreSQL SQL adapters support this capability; ordinary `CacheLayer` behavior is unchanged. In an ambient SQL transaction, a callback error rolls back only the update's savepoint and the surrounding transaction remains usable. SQLite configures a 5-second busy timeout with `_pragma=busy_timeout(5000)` unless the DSN already specifies `_pragma`, `_busy_timeout`, or `_timeout`.
 
+## Optional append-only paged KV
+
+KV instances may also implement `storage.PagedKV` (`storage.AssertPagedKV`) for append-only, cursor-based streams. `Append(ctx, key, cursor, value)` preserves append order and requires a non-empty cursor unique within that key. `Page(ctx, key, after, limit)` returns values after the supplied cursor; an empty cursor starts at the beginning, and `CursorFound` is false when a non-empty cursor is unknown. Limits must be positive. Implementations do not impose a hidden maximum page size or retention ceiling; callers choose the page size appropriate to their workload. The capability is available on memory, SQLite, PostgreSQL, and Redis KV backends. SQL backends require the embedded paged-KV migration to be applied explicitly.
+
+The generic NFlow action `storage.kv.page(store:, key:, after:, limit:)` exposes the capability when a store is selected dynamically. It returns the generic page items and cursor status; applications own their public defaults, cursor policy, filtering, and response shape.
+
 ## Optional tenant-scoped KV
 
 Set `tenant_scope: "tenant"` on a KV declaration to derive each key from the tenant ID in the trusted request context. Memory, SQLite, PostgreSQL, and Redis support this option; missing tenant context is rejected, while omitting the option preserves the existing shared-key behavior. KV entries are shared by callers within the same tenant. This does not resolve tenants or replace tenant filtering in application-owned GORM repositories. See [tenant-scoped KV](docs/tenant-scoped-kv.md) for migration and namespace cautions.
