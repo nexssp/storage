@@ -35,6 +35,17 @@ type Backend struct {
 
 var sqliteMemorySequence atomic.Uint64
 
+type sqliteWriterLock struct {
+	token chan struct{}
+	refs  int
+}
+
+// sqliteWriterLocks avoids competing SQLite write-lock attempts from independent pools.
+var sqliteWriterLocks = struct {
+	sync.Mutex
+	locks map[[32]byte]*sqliteWriterLock
+}{locks: make(map[[32]byte]*sqliteWriterLock)}
+
 // NewBackend constructs a backend. option is "path" for SQLite or "dsn"
 // for PostgreSQL. SQL schemas must be upgraded separately with Goose.
 func NewBackend(name, driver string, kind storage.Kind, option string) *Backend {
@@ -203,6 +214,36 @@ type instance struct {
 	closeErr     error
 }
 
+func (i *instance) lockSQLiteWriter(ctx context.Context) (func(), error) {
+	sqliteWriterLocks.Lock()
+	lock := sqliteWriterLocks.locks[i.databaseID]
+	if lock == nil {
+		lock = &sqliteWriterLock{token: make(chan struct{}, 1)}
+		sqliteWriterLocks.locks[i.databaseID] = lock
+	}
+	lock.refs++
+	sqliteWriterLocks.Unlock()
+
+	releaseRef := func() {
+		sqliteWriterLocks.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(sqliteWriterLocks.locks, i.databaseID)
+		}
+		sqliteWriterLocks.Unlock()
+	}
+	select {
+	case lock.token <- struct{}{}:
+		return func() {
+			<-lock.token
+			releaseRef()
+		}, nil
+	case <-ctx.Done():
+		releaseRef()
+		return nil, ctx.Err()
+	}
+}
+
 type sqlExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -311,8 +352,8 @@ func (i *instance) getRaw(ctx context.Context, key string) (raw []byte, hit bool
 
 var savepointSequence atomic.Uint64
 
-// Update serializes the read/modify/write inside a SQL transaction. SQLite's
-// no-op UPDATE obtains its database write lock before the SELECT (even on miss);
+// Update serializes the read/modify/write inside a SQL transaction. SQLite uses
+// a per-database process gate and a no-op UPDATE before the SELECT (even on miss);
 // PostgreSQL uses a transaction-scoped advisory lock, including for absent keys.
 //
 //nolint:gocyclo // Lock, callback, savepoint, and commit must share one transaction.
@@ -330,6 +371,14 @@ func (i *instance) Update(ctx context.Context, key string, fn func(any, bool) (a
 	binding, ambient := transactionFromContext(ctx)
 	if ambient && binding.databaseID != i.databaseID {
 		return storage.BadRequest("sql storage: transaction database does not match storage backend")
+	}
+	if !ambient && !i.postgres {
+		// SQLite permits one writer per database, so serialize this process's independent pools first.
+		unlock, lockErr := i.lockSQLiteWriter(ctx)
+		if lockErr != nil {
+			return lockErr
+		}
+		defer unlock()
 	}
 	var tx *sql.Tx
 	txctx := ctx
